@@ -1,0 +1,627 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Dashboard</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Jost:wght@400;600&family=Playfair+Display:wght@400;700&family=Press+Start+2P&display=swap">
+<style>
+  /* Space (default look) */
+  :root, :root[data-theme="space"] {
+    --bg: #05060c; --panel: rgba(12, 14, 26, 0.74); --drawer: rgba(10, 12, 22, 0.94); --ink: #e8ebf5; --muted: #9aa3bd;
+    --line: rgba(150, 160, 255, 0.22); --chip: rgba(255, 255, 255, 0.08); --glass: rgba(255, 255, 255, 0.04);
+    --blocked: #f59e0b; --working: #60a5fa; --idle: #a78bfa; --done: #4ade80; --other: #94a3b8;
+    --accent: #60a5fa; --term-bg: #05060c;
+    --display: var(--font);
+    --title-fill: var(--ink);
+    --glow: none; --glow-soft: none; --title-glow: none;
+    --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+    --page-bg: linear-gradient(rgba(5, 6, 12, 0.25), rgba(5, 6, 12, 0.6)), url("space.jpg") center / cover fixed no-repeat, #05060c;
+  }
+  /* Ember: warm palette with serif type */
+  :root[data-theme="ember"] {
+    --bg: #1a0f0a; --panel: rgba(34, 18, 10, 0.82); --drawer: rgba(26, 15, 10, 0.97); --ink: #fff2e6; --muted: #e6c7a8;
+    --line: rgba(255, 180, 120, 0.18); --chip: rgba(255, 180, 120, 0.1); --glass: rgba(255, 180, 120, 0.04);
+    --blocked: #ff9a4d; --working: #ffd4a3; --idle: #ffb36b; --done: #7fdca4; --other: #b08b6b;
+    --accent: #ffb36b; --term-bg: #1a0f0a;
+    --font: Georgia, "Times New Roman", Times, serif;
+    --display: "Playfair Display", Georgia, "Times New Roman", serif;
+    --title-fill: var(--ink);
+    --glow: none; --glow-soft: none; --title-glow: none;
+    --page-bg: radial-gradient(circle at 85% -10%, rgba(255, 154, 77, 0.14), transparent 45%), #1a0f0a;
+  }
+  /* Walnut and chrome: mid-century modern, dark. Walnut panels, chrome hairlines, brass/teak/olive status accents */
+  :root[data-theme="walnut"] {
+    --bg: #0e0a07; --panel: rgba(34, 24, 17, 0.88); --drawer: rgba(20, 14, 10, 0.97); --ink: #f1ebe2; --muted: #a8968a;
+    --line: rgba(196, 202, 210, 0.2); --chip: rgba(196, 202, 210, 0.1); --glass: rgba(255, 255, 255, 0.025);
+    --blocked: #a8733f; --working: #c4cad2; --idle: #6f4a2c; --done: #d4a942; --other: #9fc4d8;
+    /* Finishes: bronze (needs you), chrome (working), walnut grain (idle), gold (done), glass (other) */
+    --blocked-fill: linear-gradient(100deg, #5a3a1f 0%, #b07a45 26%, #e8b984 36%, #8a5a2e 52%, #6b4424 74%, #b07a45 92%);
+    --working-fill: linear-gradient(100deg, #6b717a 0%, #c4cad2 25%, #f6f8fa 36%, #9ca3ad 48%, #7c828c 62%, #d5dae1 82%, #8d939c 100%);
+    --idle-fill: repeating-linear-gradient(92deg, #5a3a22 0 3px, #7a5232 3px 5px, #4a2e1a 5px 9px, #6a4628 9px 11px, #3e2516 11px 14px);
+    --done-fill: linear-gradient(100deg, #8a6420 0%, #e7c46a 28%, #fff1b8 38%, #c9a045 50%, #8f6a22 70%, #e0b65c 90%);
+    --other-fill: linear-gradient(135deg, rgba(225, 240, 250, 0.6) 0%, rgba(255, 255, 255, 0.08) 42%, rgba(200, 225, 240, 0.4) 58%, rgba(255, 255, 255, 0.14) 100%);
+    --accent: #d7dce3; --term-bg: #0e0a07;
+    /* Chrome: a bright band across a grey base gives the sheen */
+    --fill: linear-gradient(100deg, #6b717a 0%, #c4cad2 25%, #f6f8fa 36%, #9ca3ad 48%, #7c828c 62%, #d5dae1 82%, #8d939c 100%);
+    --title-fill: linear-gradient(100deg, #8a909a 0%, #e6eaef 30%, #ffffff 40%, #a3aab4 52%, #d2d7de 75%, #9aa1ab 100%);
+    /* Outer glow for chrome parts: a tight bright halo and a wide faint one */
+    --glow: 0 0 6px rgba(214, 220, 228, 0.55), 0 0 14px rgba(196, 202, 210, 0.25);
+    --glow-soft: 0 0 18px rgba(196, 202, 210, 0.12);
+    --title-glow: drop-shadow(0 0 6px rgba(214, 220, 228, 0.45));
+    --font: "Jost", system-ui, sans-serif;
+    --display: "Jost", system-ui, sans-serif;
+    --page-bg:
+      radial-gradient(ellipse at 15% 0%, #3a2616 0%, rgba(58, 38, 22, 0) 55%),
+      repeating-linear-gradient(90deg, rgba(255, 230, 200, 0.022) 0 1px, transparent 1px 7px),
+      repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.25) 0 2px, transparent 2px 18px),
+      #0e0a07;
+  }
+  /* 8-bit: black pixel HUD, cyan terminals, and square arcade panels. */
+  :root[data-theme="8bit"] {
+    --bg: #060913; --panel: rgba(9, 18, 34, 0.96); --drawer: rgba(6, 12, 25, 0.98); --ink: #e4f8ff; --muted: #83b9cc;
+    --line: rgba(83, 224, 255, 0.4); --chip: rgba(83, 224, 255, 0.12); --glass: rgba(83, 224, 255, 0.045);
+    --blocked: #ff5478; --working: #ffe65c; --idle: #bd8cff; --done: #50ef92; --other: #8298b5;
+    --accent: #53e0ff; --term-bg: #030711;
+    --font: "Courier New", Consolas, monospace; --display: "Press Start 2P", "Courier New", monospace;
+    --title-fill: var(--accent); --glow: none; --glow-soft: none; --title-glow: none;
+    --page-bg:
+      repeating-linear-gradient(0deg, rgba(83, 224, 255, 0.035) 0 1px, transparent 1px 16px),
+      repeating-linear-gradient(90deg, rgba(83, 224, 255, 0.035) 0 1px, transparent 1px 16px),
+      #060913;
+  }
+  :root[data-theme="8bit"] header,
+  :root[data-theme="8bit"] .tile,
+  :root[data-theme="8bit"] #plane-wrap,
+  :root[data-theme="8bit"] .drawer,
+  :root[data-theme="8bit"] #flow-panel,
+  :root[data-theme="8bit"] #waits-panel,
+  :root[data-theme="8bit"] #closed-panel,
+  :root[data-theme="8bit"] .mini {
+    border: 2px solid var(--line); border-radius: 0; backdrop-filter: none; box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.7);
+  }
+  :root[data-theme="8bit"] header h1,
+  :root[data-theme="8bit"] .tile .k {
+    font-family: var(--display); letter-spacing: 0; text-transform: uppercase;
+  }
+  :root[data-theme="8bit"] header h1 { font-size: 11px; }
+  :root[data-theme="8bit"] .tile .k { font-size: 9px; }
+  :root[data-theme="8bit"] .closed-chip,
+  :root[data-theme="8bit"] button { border-radius: 0; }
+  :root[data-theme="8bit"] .themes button[aria-pressed="true"] { outline: 1px solid var(--accent); outline-offset: -3px; }
+  /* Paper: Notion-like workspace. White paper, jet-black ink and rules, deep tag colors for status. Crisp, no blur. */
+  :root[data-theme="paper"] {
+    --bg: #ffffff; --panel: #ffffff; --drawer: #ffffff; --ink: #0a0a0a; --muted: #55534e;
+    --line: rgba(10, 10, 10, 0.28); --chip: rgba(10, 10, 10, 0.07); --glass: rgba(10, 10, 10, 0.03);
+    --blocked: #a8261e; --working: #154a85; --idle: #5a3784; --done: #0b5e40; --other: #5f5e5a;
+    --accent: #0a0a0a; --term-bg: #f4f3f0; --rule: #0a0a0a; --hard-shadow: 2px 2px 0 rgba(10, 10, 10, 0.9);
+    --chosen-bg: #0a0a0a; --chosen-ink: #ffffff;
+    --font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --display: var(--font);
+    --title-fill: var(--ink);
+    --glow: none; --glow-soft: none; --title-glow: none;
+    --plane-style: crisp;
+    /* Paper: off-white stock with a fine fibre grain */
+    --page-bg:
+      repeating-linear-gradient(115deg, rgba(10, 10, 10, 0.02) 0 1px, transparent 1px 4px),
+      repeating-linear-gradient(25deg, rgba(10, 10, 10, 0.014) 0 1px, transparent 1px 6px),
+      #f4f3f0;
+  }
+  /* Ink: the same look reversed. Off-white type on charcoal, white rules, muted deep status colors. */
+  :root[data-theme="ink"] {
+    --bg: #191919; --panel: #202020; --drawer: #202020; --ink: #f1f1ef; --muted: #a3a29e;
+    --line: rgba(241, 241, 239, 0.26); --chip: rgba(241, 241, 239, 0.08); --glass: rgba(241, 241, 239, 0.03);
+    --blocked: #c4463c; --working: #3c74b8; --idle: #7d5bab; --done: #2c8259; --other: #8a8984;
+    --accent: #f1f1ef; --term-bg: #141414; --rule: #f1f1ef; --hard-shadow: 2px 2px 0 rgba(0, 0, 0, 0.85);
+    --chosen-bg: #f1f1ef; --chosen-ink: #191919;
+    --font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --display: var(--font);
+    --title-fill: var(--ink);
+    --glow: none; --glow-soft: none; --title-glow: none;
+    --plane-style: crisp;
+    --page-bg: #191919;
+    --agent-fill: #000000; --agent-ring: 0.5;
+  }
+  :root:is([data-theme="paper"], [data-theme="ink"]) :is(.tile, #plane-wrap, .drawer, #flow-panel, #waits-panel, #closed-panel, .mini) {
+    border: 1px solid var(--rule); border-radius: 0; backdrop-filter: none; box-shadow: var(--hard-shadow);
+  }
+  :root:is([data-theme="paper"], [data-theme="ink"]) header { border-bottom: 1px solid var(--rule); backdrop-filter: none; }
+  :root:is([data-theme="paper"], [data-theme="ink"]) header h1 { font-weight: 700; letter-spacing: -0.01em; }
+  :root:is([data-theme="paper"], [data-theme="ink"]) .tile .k { letter-spacing: -0.02em; font-weight: 700; }
+  :root:is([data-theme="paper"], [data-theme="ink"]) :is(.closed-chip, button) { border-radius: 0; }
+  :root:is([data-theme="paper"], [data-theme="ink"]) .themes button[aria-pressed="true"] {
+    background: var(--chosen-bg); color: var(--chosen-ink); border-color: var(--chosen-bg);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; color: var(--ink); background: var(--page-bg); background-color: var(--bg);
+         font: 16px/1.45 var(--font); }
+  a { color: var(--accent); }
+  header { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px;
+           padding: 16px 20px; border-bottom: 1px solid var(--line); background: var(--panel); backdrop-filter: blur(6px); }
+  header h1 { font-family: var(--display); font-size: 19px; margin: 0; letter-spacing: .02em; justify-self: center;
+              background: var(--title-fill); -webkit-background-clip: text; background-clip: text; color: transparent;
+              filter: var(--title-glow); }
+  /* Theme switcher: a small segmented control */
+  .themes { display: inline-flex; border: 1px solid var(--line); justify-self: end; }
+  .themes button { border: none; padding: 3px 12px; }
+  .themes button[aria-pressed="true"] { background: var(--chip); color: var(--ink); box-shadow: var(--glow-soft); }
+  .meta { color: var(--muted); font-size: 14px; justify-self: start; }
+  .stats { display: grid; gap: 12px; padding: 12px 12px 0; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+  .tile { background: var(--panel); border: 1px solid var(--line); backdrop-filter: blur(6px); padding: 14px 16px; }
+  .tile .k { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .tile .v { font-size: 30px; font-weight: 600; margin-top: 4px; }
+  .tile .s { font-size: 13px; color: var(--muted); }
+  .models { font-size: 14px; margin-top: 6px; max-height: 280px; overflow-y: auto; }
+  .models div { display: flex; justify-content: space-between; gap: 8px; padding: 1px 0; }
+  .models span:first-child { overflow-wrap: anywhere; }
+  .drawer-bg { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; z-index: 10; }
+  .drawer-bg.open { display: block; }
+  .drawer { position: fixed; top: 0; right: 0; height: 100%; width: min(520px, 100%); background: var(--drawer);
+            border-left: 1px solid var(--line); overflow-y: auto; padding: 18px 18px 40px;
+            transform: translateX(100%); transition: transform .18s ease; }
+  .drawer-bg.open .drawer { transform: none; }
+  .drawer h3 { margin: 0 0 4px; font-size: 19px; overflow-wrap: anywhere; }
+  .drawer .sec { margin-top: 16px; }
+  .drawer .label { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 4px; }
+  .drawer pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--glass); border: 1px solid var(--line); padding: 10px; margin: 0; font: 14px/1.45 ui-monospace, Consolas, monospace; }
+  .md { overflow-wrap: anywhere; font-size: 15px; background: var(--glass); border: 1px solid var(--line); padding: 10px; }
+  .md > :first-child { margin-top: 0; }
+  .md > :last-child { margin-bottom: 0; }
+  .md p, .md ul, .md ol, .md blockquote, .md pre, .md table { margin: 0 0 8px; }
+  .md h1, .md h2, .md h3, .md h4 { font-size: 16px; margin: 10px 0 6px; }
+  .md ul, .md ol { padding-left: 20px; }
+  .md code { font: 14px ui-monospace, Consolas, monospace; background: var(--chip); padding: 0 4px; }
+  .md pre { background: var(--bg); padding: 8px; overflow-x: auto; }
+  .md pre code { background: none; padding: 0; }
+  .md blockquote { border-left: 3px solid var(--line); padding-left: 10px; color: var(--muted); }
+  .md table { border-collapse: collapse; display: block; overflow-x: auto; }
+  .md th, .md td { border: 1px solid var(--line); padding: 3px 6px; text-align: left; }
+  .md a { color: var(--accent); }
+  .tl { list-style: none; padding: 0; margin: 0; }
+  .tl li { border-left: 2px solid var(--line); padding: 4px 0 8px 10px; }
+  .tl .when { color: var(--muted); font-size: 13px; }
+  button, .btn { background: none; border: 1px solid var(--line); color: var(--ink); padding: 3px 10px; cursor: pointer; font: inherit; font-size: 14px; text-decoration: none; display: inline-block; }
+  button:hover, .btn:hover { border-color: var(--accent); }
+  .close { float: right; }
+  .banner { margin: 12px 12px 0; padding: 8px 12px; background: var(--panel); border: 1px solid var(--blocked); display: none; }
+  .banner.show { display: block; }
+
+  /* Mini terminal window (floating) and full-tab /watch view */
+  .mini { position: fixed; right: 16px; bottom: 16px; width: min(640px, calc(100% - 32px)); z-index: 20;
+          background: var(--drawer); border: 1px solid var(--line); box-shadow: 0 8px 30px rgba(0,0,0,.5); display: none; }
+  .mini.open { display: block; }
+  .mini .bar { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--line); font-size: 14px; }
+  .mini .bar .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .mini .msg { padding: 4px 8px; font-size: 13px; color: var(--muted); }
+  .mini .screen { height: 380px; overflow: auto; padding: 4px; }
+  /* The 3D workflow view is the only active layout. */
+  .right { display: flex; gap: 8px; align-items: center; justify-self: end; }
+  #plane-wrap { position: relative; margin: 12px; height: calc(100vh - 250px); min-height: 420px; background: var(--panel);
+                border: 1px solid var(--line); backdrop-filter: blur(6px); overflow: hidden; }
+  #plane { width: 100%; height: 100%; display: block; touch-action: none; }
+  #plane-hint { position: absolute; left: 12px; bottom: 10px; color: var(--muted); font-size: 13px; pointer-events: none; }
+  #camera-controls { position: absolute; top: 10px; right: 10px; display: flex; gap: 4px; z-index: 3; }
+  #camera-controls button { border: 1px solid var(--line); padding: 5px 8px; color: var(--ink); background: var(--drawer); font: inherit; cursor: pointer; }
+  #camera-controls button:hover, #camera-controls button:focus-visible { border-color: var(--accent); outline: 1px solid var(--accent); }
+  /* Flow view: the calls along one clicked line, newest first */
+  #flow-panel { position: absolute; top: 52px; right: 0; bottom: 0; width: min(380px, 100%); overflow-y: auto;
+                background: var(--drawer); border-left: 1px solid var(--line); padding: 14px; font-size: 14px; }
+  #flow-panel[hidden] { display: none; }
+  .flow-head { margin-bottom: 10px; }
+  .flow-title { font-weight: 600; overflow-wrap: anywhere; }
+  .flow-kind { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .flow-actions { display: flex; gap: 8px; margin-top: 8px; }
+  .selection-list { display: flex; flex-direction: column; gap: 10px; }
+  .selection-card { min-width: 0; padding: 9px; border: 1px solid var(--line); background: var(--panel); }
+  .selection-card-head { display: flex; align-items: start; gap: 8px; justify-content: space-between; }
+  .selection-item-title { min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+  .selection-remove { flex: none; min-width: 28px; padding: 0 5px; border: 1px solid var(--line); background: var(--chip); color: var(--ink); font: inherit; cursor: pointer; }
+  .selection-details { display: grid; grid-template-columns: minmax(78px, max-content) minmax(0, 1fr); gap: 3px 8px; margin: 8px 0 2px; }
+  .selection-label { color: var(--muted); }
+  .selection-value { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+  .selection-actions { flex-wrap: wrap; }
+  .selection-status { color: var(--muted); font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
+  .flow-list { list-style: none; padding: 0; margin: 0; }
+  .flow-row { display: grid; grid-template-columns: 70px 1fr auto; gap: 4px 8px; padding: 8px 0; border-top: 1px solid var(--line); }
+  .flow-when { color: var(--muted); font-size: 13px; }
+  .flow-tool { font-weight: 600; overflow-wrap: anywhere; }
+  .flow-detail { grid-column: 1 / -1; color: var(--muted); overflow-wrap: anywhere; font-size: 13px; }
+  .flow-bar { grid-column: 1 / -2; height: 4px; background: var(--chip); }
+  .flow-fill { height: 100%; background: var(--accent); box-shadow: var(--glow-soft); }
+  .flow-row.running .flow-fill { animation: flow-run 1.6s ease-in-out infinite; opacity: .7; }
+  .flow-ms { color: var(--muted); font-size: 13px; text-align: right; }
+  .flow-empty { color: var(--muted); padding: 12px 0; }
+  @keyframes flow-run { 0%, 100% { opacity: .35; } 50% { opacity: .9; } }
+  @media (prefers-reduced-motion: reduce) { .flow-row.running .flow-fill { animation: none; } }
+  /* Foldable windows: the lane diagram and the waits list */
+  .fold-bar { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; border: none; border-bottom: 1px solid var(--line);
+              padding: 8px 0; background: none; color: var(--ink); font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
+  .fold-caret { color: var(--muted); width: 12px; }
+  .fold-body[hidden] { display: none; }
+  .fold-body { padding-top: 8px; }
+  .flow-actions button { font-size: 13px; }
+  /* Lane diagram: one row per target, calls as blocks on a 30-minute axis */
+  .lane { display: grid; grid-template-columns: 110px 1fr; gap: 8px; align-items: center; margin: 4px 0; font-size: 13px; }
+  .lane-on .lane-name { color: var(--ink); font-weight: 600; }
+  .lane-name { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lane-track { position: relative; height: 14px; background: var(--chip); }
+  .lane-block { position: absolute; top: 2px; bottom: 2px; min-width: 2px; opacity: .85; }
+  .lane-block.running { animation: flow-run 1.6s ease-in-out infinite; }
+  .lane-axis { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin: 4px 0 10px 118px; }
+  /* Waits window: top-left of the plane, folds away */
+  #waits-panel { position: absolute; top: 10px; left: 10px; width: min(330px, calc(100% - 20px)); max-height: 55%; overflow-y: auto;
+                 background: var(--drawer); border: 1px solid var(--line); padding: 8px 12px; font-size: 13px; }
+  #waits-panel .fold-bar { font-size: 12px; }
+  .wait-row { padding: 8px 0; border-top: 1px solid var(--line); cursor: pointer; }
+  .wait-row:first-child { border-top: none; }
+  .wait-name { font-weight: 600; overflow-wrap: anywhere; }
+  .wait-bar { height: 4px; background: var(--chip); margin: 4px 0; }
+  .wait-fill { height: 100%; background: var(--blocked); }
+  .wait-stat, .wait-longest { color: var(--muted); }
+  .wait-tip { color: var(--ink); margin-top: 4px; }
+  /* Closed window: agents with no open session, packed as chips, bottom-left, folded by default */
+  #closed-panel { position: absolute; left: 10px; bottom: 34px; width: min(330px, calc(100% - 20px)); max-height: 40%;
+                  overflow-y: auto; background: var(--drawer); border: 1px solid var(--line); padding: 6px 12px; font-size: 12px; }
+  #closed-panel[hidden] { display: none; }
+  #closed-panel .fold-bar { font-size: 12px; }
+  .closed-grid { display: flex; flex-wrap: wrap; gap: 4px; padding-bottom: 6px; }
+  .closed-chip { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 2px 8px; font: inherit;
+                 border: 1px solid var(--line); background: var(--chip); color: var(--ink); border-radius: 0; cursor: pointer; }
+  .closed-chip:disabled { cursor: default; opacity: .75; }
+  .closed-brand-logo { width: 16px; height: 16px; flex: none; image-rendering: pixelated; }
+  .closed-dot { width: 7px; height: 7px; flex: none; }
+  .closed-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+  /* Narrow screens: the flow window becomes a bottom sheet and the hint moves away */
+  @media (max-width: 720px) {
+    #plane-wrap { height: calc(100vh - 170px); min-height: 360px; }
+    #flow-panel { left: 0; top: auto; height: 62%; width: auto; border-left: none; border-top: 1px solid var(--line); }
+    #waits-panel { max-height: 30%; width: calc(100% - 20px); }
+    #closed-panel { bottom: 10px; max-height: 25%; }
+    #plane-hint { display: none; }
+  }
+  body.watch header, body.watch .stats, body.watch #plane-wrap, body.watch .banner { display: none; }
+  body.watch .mini { position: static; width: 100%; height: 100vh; display: block; border: none; }
+  body.watch .mini .screen { height: calc(100vh - 60px); }
+</style>
+</head>
+<body>
+<header>
+  <span class="meta" id="status">loading…</span>
+  <h1>Agent Dashboard</h1>
+  <div class="right">
+    <div class="themes" role="group" aria-label="Theme">
+      <button type="button" data-theme-choice="ember" aria-pressed="false">Ember</button>
+      <button type="button" data-theme-choice="walnut" aria-pressed="false">Walnut</button>
+      <button type="button" data-theme-choice="space" aria-pressed="false">Space</button>
+      <button type="button" data-theme-choice="8bit" aria-pressed="false">8-Bit</button>
+      <button type="button" data-theme-choice="paper" aria-pressed="false">Paper</button>
+      <button type="button" data-theme-choice="ink" aria-pressed="false">Ink</button>
+    </div>
+  </div>
+</header>
+<div class="banner" id="banner"></div>
+<section class="stats" id="stats"></section>
+<section id="plane-wrap"><canvas id="plane" aria-label="Three-dimensional agent workflow field"></canvas><div id="camera-controls" role="group" aria-label="Camera orientation"><button type="button" data-camera-view="zenith" title="View from above">Zenith</button><button type="button" data-camera-view="nadir" title="View from below">Nadir</button><button type="button" data-camera-view="center" title="Center camera on the selected element" disabled>Center</button><button type="button" data-camera-view="reset" title="Reset camera">Reset</button></div><div id="plane-hint">each runtime has a domain · shared tools and files sit between domains that use them · cloud marks hosted work · drag to rotate · shift-drag to pan · ctrl-click agents or resources to compare · scroll to zoom · Center to orbit the selected node · double-click empty space to deselect</div></section>
+
+<div class="drawer-bg" id="drawer-bg">
+  <aside class="drawer" id="drawer" role="dialog" aria-modal="true"></aside>
+</div>
+
+<div class="mini" id="mini">
+  <div class="bar">
+    <span class="title" id="mini-title"></span>
+    <a class="btn" id="mini-pop" target="_blank" rel="noopener">Open in tab</a>
+    <button type="button" id="mini-close">Close</button>
+  </div>
+  <div class="msg" id="mini-msg"></div>
+  <div class="screen" id="mini-screen"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+<script src="plane.js"></script>
+<script>
+const POLL_MS = 3000;
+const LOG_COLS = 120, LOG_ROWS = 40;
+let lastJson = "";
+let jobsById = new Map();
+let watch = null;   // { id, name, term, lastSig, timer }
+let latestRuntimeStatus = "";
+
+function el(tag, attrs = {}, children = []) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") n.className = v;
+    else if (k === "style") n.setAttribute("style", v);
+    else n.setAttribute(k, v);
+  }
+  for (const c of [].concat(children)) {
+    if (c == null || c === false) continue;
+    n.append(c.nodeType ? c : document.createTextNode(String(c)));
+  }
+  return n;
+}
+
+function ago(iso) {
+  if (!iso) return "";
+  const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+  if (s < 60) return Math.floor(s) + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+
+const fmtUsd = n => n == null ? "not reported" : "$" + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtTok = n => {
+  n = n || 0;
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(n);
+};
+
+// Agent text is untrusted, so the HTML from marked always goes through DOMPurify.
+function renderMd(text) {
+  const box = el("div", { class: "md" });
+  if (window.marked && window.DOMPurify) {
+    box.innerHTML = DOMPurify.sanitize(marked.parse(text || "", { breaks: true, gfm: true }));
+  } else {
+    box.textContent = text || "";  // libraries blocked: show the raw text instead
+  }
+  return box;
+}
+
+function statTile(label, value, sub, extra) {
+  return el("div", { class: "tile" }, [
+    el("div", { class: "k" }, label),
+    el("div", { class: "v" }, value),
+    el("div", { class: "s" }, sub),
+    extra || null,
+  ]);
+}
+
+function renderStats(metrics) {
+  if (!metrics) {
+    return [el("div", { class: "tile" }, [el("div", { class: "k" }, "Usage"), el("div", { class: "s" }, "scanning transcripts…")])];
+  }
+  const t = metrics.total;
+  const coverage = metrics.costCoverage || {};
+  const models = Object.entries(metrics.byModel || {}).map(([name, b]) =>
+    el("div", {}, [el("span", {}, name), el("span", {}, `${fmtUsd(b.usd)} · ${fmtTok(b.output)} out`)]));
+  const sessionCount = metrics.sessionCount ?? Object.keys(metrics.sessions || {}).length;
+  const costCoverage = `${coverage.pricedSessions || 0} sessions priced · ${coverage.unreportedSessions || 0} without cost data`;
+  return [
+    statTile("Recorded cost", fmtUsd(t.usd), costCoverage),
+    statTile("Output tokens", fmtTok(t.output), `${fmtTok(t.input)} in · ${fmtTok(t.cacheRead)} cache read · ${fmtTok(t.cacheWrite)} cache write`),
+    statTile("Messages", t.messages.toLocaleString(), `across ${sessionCount} agent sessions`),
+    el("div", { class: "tile" }, [el("div", { class: "k" }, "Cost by model"), el("div", { class: "models" }, models.length ? models : [el("div", {}, "no model usage recorded")])]),
+  ];
+}
+
+function render(data) {
+  jobsById = new Map(data.jobs.map(j => [j.id, j]));
+
+  document.getElementById("stats").replaceChildren(...renderStats(data.metrics));
+
+  const blocked = data.jobs.filter(job => job.state === "blocked").length;
+  const banner = document.getElementById("banner");
+  const auth = data.authStatus && data.authStatus.status;
+  const msgs = [];
+  if (blocked) msgs.push(`${blocked} agent${blocked > 1 ? "s" : ""} waiting on you`);
+  if (auth === "auth_required") msgs.push("daemon needs sign-in (auth_required)");
+  banner.textContent = msgs.join(" · ");
+  banner.classList.toggle("show", msgs.length > 0);
+
+}
+
+function updateRuntimeStatus(agents) {
+  const labels = { claude: "Claude Code", codex: "Codex/GPT", pi: "Pi", openai: "OpenAI/GPT", gpt: "GPT" };
+  const counts = new Map();
+  for (const agent of agents) {
+    const domain = String(agent.domain || agent.provider || "other").toLowerCase();
+    counts.set(domain, (counts.get(domain) || 0) + 1);
+  }
+  const domains = [...counts].sort(([a], [b]) => a.localeCompare(b))
+    .map(([domain, count]) => `${labels[domain] || domain} ${count}`);
+  latestRuntimeStatus = `${agents.length} live agents${domains.length ? " · " + domains.join(" · ") : ""} · refreshed ${new Date().toLocaleTimeString()}`;
+  if (!isWatchPage()) {
+    document.getElementById("status").textContent = latestRuntimeStatus;
+  }
+}
+
+function openDrawer(id) {
+  const job = jobsById.get(id);
+  if (!job) return;
+  const d = document.getElementById("drawer");
+  const section = (label, body) => body == null || body === "" ? null
+    : el("div", { class: "sec" }, [el("div", { class: "label" }, label), body]);
+  const pre = (text) => el("pre", {}, text);
+  const prose = (text) => renderMd(text);
+  const usage = job.usage
+    ? `${job.usage.usd == null ? "cost not reported" : `${fmtUsd(job.usage.usd)} recorded`} · ${fmtTok(job.usage.output)} out · ${fmtTok(job.usage.input)} in · ${fmtTok(job.usage.cacheRead)} cache read`
+    : "no cost recorded yet";
+
+  d.replaceChildren(
+    el("button", { class: "close", type: "button", id: "close" }, "Close"),
+    el("h3", {}, job.name),
+    el("div", { class: "detail", style: "color:var(--muted);font-size:14px" },
+      `${job.state} · ${job.model || "model ?"} · ${job.id} · created ${ago(job.createdAt)}`),
+    el("div", { style: "margin-top:10px;display:flex;gap:8px;flex-wrap:wrap" }, [
+      el("button", { type: "button", id: "watch-btn" }, "Watch live"),
+      el("a", { class: "btn", href: `/watch?id=${encodeURIComponent(job.id)}`, target: "_blank", rel: "noopener" }, "Open in tab"),
+    ]),
+    section("Usage", pre(usage)),
+    section("Subagents", job.subagents && job.subagents.length
+      ? el("ul", { class: "tl" }, job.subagents.map(a =>
+          el("li", {}, [
+            el("div", { class: "when" }, `${a.type} · ${a.status} · ${ago(a.updatedAt)}`),
+            el("div", {}, a.description || "(no description)"),
+            a.lastText ? renderMd(a.lastText) : null,
+          ])))
+      : null),
+    section("Intent", prose(job.intent)),
+    section("Current status", prose(job.detail)),
+    section("Needs you", job.needs ? prose(job.needs) : null),
+    section("Suggested reply", job.suggestedReply ? prose(job.suggestedReply) : null),
+    section("Result", job.result ? prose(job.result) : null),
+    section("Working directory", pre(job.cwd || "")),
+    section("Recent activity", job.timeline.length
+      ? el("ul", { class: "tl" }, job.timeline.slice().reverse().map(t =>
+          el("li", {}, [
+            el("div", { class: "when" }, `${t.state || ""} · ${ago(t.at)}`),
+            el("div", {}, t.detail || ""),
+            t.text ? renderMd(t.text) : null,
+          ])))
+      : el("div", { class: "empty" }, "no timeline yet")),
+  );
+  document.getElementById("close").addEventListener("click", closeDrawer);
+  document.getElementById("watch-btn").addEventListener("click", () => openWatch(job.id, job.name));
+  document.getElementById("drawer-bg").classList.add("open");
+}
+
+function closeDrawer() {
+  document.getElementById("drawer-bg").classList.remove("open");
+}
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+// ---- Theme switching. The choice is a per-viewer preference, so localStorage is fine (wrapped in try/catch).
+const THEME_KEY = "agent-dashboard-theme";
+function applyTheme(name) {
+  if (name === "site") name = "ember";   // older saved name
+  const theme = ["ember", "walnut", "space", "8bit", "paper", "ink"].includes(name) ? name : "ember";
+  document.documentElement.dataset.theme = theme;
+  for (const b of document.querySelectorAll("[data-theme-choice]")) {
+    b.setAttribute("aria-pressed", String(b.dataset.themeChoice === theme));
+  }
+  try { localStorage.setItem(THEME_KEY, theme); } catch (err) { /* private mode: keep the in-memory theme */ }
+  // Re-theme an open terminal without losing its output.
+  if (watch) { watch.term.options.theme = { background: cssVar("--term-bg"), foreground: cssVar("--ink") }; }
+}
+for (const b of document.querySelectorAll("[data-theme-choice]")) {
+  b.addEventListener("click", () => applyTheme(b.dataset.themeChoice));
+}
+let savedTheme = null;
+try { savedTheme = localStorage.getItem(THEME_KEY); } catch (err) { /* unavailable */ }
+applyTheme(savedTheme || "ember");
+
+// Initialize the only active dashboard layout.
+if (window.PlaneView && !isWatchPage()) {
+  PlaneView.init({
+    onOpen: id => openDrawer(id),
+    onWatch: (id, name) => openWatch(id, name),
+    onStats: agents => updateRuntimeStatus(agents),
+  });
+  PlaneView.setActive(true);
+}
+
+// ---- Live terminal: polls `claude logs <id>` (via /api/logs) and replays it in xterm.js.
+function ensureTerm(container) {
+  const term = new Terminal({ cols: LOG_COLS, rows: LOG_ROWS, fontSize: 12, convertEol: false,
+    disableStdin: true, scrollback: 5000,
+    theme: { background: cssVar("--term-bg"), foreground: cssVar("--ink") } });
+  term.open(container);
+  // Keep the agent's 120-column layout intact and scale the font so 120 columns fill the window.
+  const fit = () => {
+    const size = Math.floor(container.clientWidth / (LOG_COLS * 0.6));
+    term.options.fontSize = Math.max(8, Math.min(16, size));
+  };
+  fit();
+  window.addEventListener("resize", fit);
+  return term;
+}
+
+async function refreshWatch() {
+  if (!watch) return;
+  const msg = document.getElementById("mini-msg");
+  try {
+    const res = await fetch(`/api/logs?id=${encodeURIComponent(watch.id)}`, { cache: "no-store" });
+    if (!res.ok) {
+      msg.textContent = (await res.text()) || "logs unavailable";
+      return;
+    }
+    const text = await res.text();
+    // Replay only when the output changed. Logs are a full terminal replay, so rewrite from scratch.
+    const sig = text.length + ":" + text.slice(-200);
+    if (sig !== watch.lastSig) {
+      watch.lastSig = sig;
+      watch.term.reset();
+      watch.term.write(text);
+    }
+    msg.textContent = `live · ${new Date().toLocaleTimeString()}`;
+  } catch (err) {
+    msg.textContent = "disconnected from server";
+  }
+}
+
+function openWatch(id, name) {
+  closeWatch();
+  const screen = document.getElementById("mini-screen");
+  screen.replaceChildren();
+  watch = { id, name, term: ensureTerm(screen), lastSig: "", timer: null };
+  document.getElementById("mini-title").textContent = name;
+  document.getElementById("mini-pop").href = `/watch?id=${encodeURIComponent(id)}`;
+  document.getElementById("mini").classList.add("open");
+  refreshWatch();
+  watch.timer = setInterval(refreshWatch, POLL_MS);
+}
+
+function closeWatch() {
+  if (!watch) return;
+  clearInterval(watch.timer);
+  watch.term.dispose();
+  watch = null;
+  document.getElementById("mini").classList.remove("open");
+}
+
+document.getElementById("mini-close").addEventListener("click", closeWatch);
+document.getElementById("drawer-bg").addEventListener("click", e => {
+  if (e.target.id === "drawer-bg") closeDrawer();
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape") { closeDrawer(); if (!isWatchPage()) closeWatch(); } });
+
+// ---- Runtime telemetry polling
+async function poll() {
+  if (isWatchPage()) return;
+  try {
+    const res = await fetch("/api/jobs", { cache: "no-store" });
+    const text = await res.text();
+    if (text !== lastJson) {
+      lastJson = text;
+      render(JSON.parse(text));
+      if (document.getElementById("drawer-bg").classList.contains("open")) {
+        const name = document.querySelector("#drawer h3")?.textContent;
+        const open = [...jobsById.values()].find(j => j.name === name);
+        if (open) openDrawer(open.id);
+      }
+    }
+  } catch (err) {
+    document.getElementById("status").textContent = "disconnected — is server.py running?";
+  }
+}
+
+// ---- /watch?id=... full-tab view
+function isWatchPage() {
+  return location.pathname === "/watch";
+}
+
+if (isWatchPage()) {
+  document.body.classList.add("watch");
+  const id = new URLSearchParams(location.search).get("id") || "";
+  // Reuse the mini window as the full-tab view.
+  document.getElementById("mini").classList.add("open");
+  openWatch(id, "agent " + id);
+  document.getElementById("mini-close").style.display = "none";
+  document.getElementById("mini-pop").style.display = "none";
+  document.title = "Watch " + id;
+} else {
+  poll();
+  setInterval(poll, POLL_MS);
+}
+</script>
+</body>
+</html>
