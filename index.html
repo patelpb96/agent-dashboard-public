@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Agent Dashboard</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Jost:wght@400;600&family=Playfair+Display:wght@400;700&family=Press+Start+2P&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Jost:wght@400;600&family=Playfair+Display:wght@400;700&family=Press+Start+2P&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&display=swap">
 <style>
   /* Space (default look) */
   :root, :root[data-theme="space"] {
@@ -130,8 +130,48 @@
   :root:is([data-theme="paper"], [data-theme="ink"]) header h1 { font-weight: 700; letter-spacing: -0.01em; }
   :root:is([data-theme="paper"], [data-theme="ink"]) .tile .k { letter-spacing: -0.02em; font-weight: 700; }
   :root:is([data-theme="paper"], [data-theme="ink"]) :is(.closed-chip, button) { border-radius: 0; }
-  :root:is([data-theme="paper"], [data-theme="ink"]) .themes button[aria-pressed="true"] {
+  /* Serif option for Paper and Ink: Source Serif 4, a book face in the spirit of Notion's serif style */
+  :root:is([data-theme="paper"], [data-theme="ink"])[data-type="serif"] {
+    --font: "Source Serif 4", Charter, "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+  }
+  :root:is([data-theme="paper"], [data-theme="ink"]) :is(.themes, .typeface) button[aria-pressed="true"] {
     background: var(--chosen-bg); color: var(--chosen-ink); border-color: var(--chosen-bg);
+  }
+  /* ---- Scrollbars, per theme. Chromium uses the ::-webkit rules (so thumbs can be gradients); Firefox gets the
+     plain scrollbar-color pair. --scroll-thumb is a colour, --scroll-fill may be a gradient. */
+  :root, :root[data-theme="space"] {
+    --scroll-size: 10px; --scroll-track: rgba(150, 160, 255, 0.05); --scroll-thumb: rgba(150, 160, 255, 0.38);
+    --scroll-hover: rgba(150, 160, 255, 0.6); --scroll-border: 2px solid transparent;
+  }
+  :root[data-theme="ember"] {
+    --scroll-track: rgba(255, 180, 120, 0.05); --scroll-thumb: rgba(255, 179, 107, 0.45); --scroll-hover: #ffb36b;
+  }
+  :root[data-theme="walnut"] {
+    --scroll-track: repeating-linear-gradient(0deg, #3e2516 0 3px, #5a3a22 3px 5px, #4a2e1a 5px 9px);
+    --scroll-thumb: #c4cad2; --scroll-hover: #f6f8fa;
+    --scroll-fill: linear-gradient(90deg, #6b717a 0%, #c4cad2 25%, #f6f8fa 40%, #9ca3ad 60%, #d5dae1 85%, #8d939c 100%);
+  }
+  :root[data-theme="8bit"] {
+    --scroll-size: 12px; --scroll-track: #060913; --scroll-thumb: #53e0ff; --scroll-hover: #ffe65c;
+    --scroll-border: 2px solid #060913;
+    --scroll-track-fill: repeating-linear-gradient(0deg, rgba(83, 224, 255, 0.12) 0 2px, transparent 2px 6px), #060913;
+  }
+  :root[data-theme="paper"] { --scroll-track: #f4f3f0; --scroll-thumb: #0a0a0a; --scroll-hover: #000000; --scroll-border: 3px solid #f4f3f0; }
+  :root[data-theme="ink"] { --scroll-track: #141414; --scroll-thumb: #f1f1ef; --scroll-hover: #ffffff; --scroll-border: 3px solid #141414; }
+  @supports not selector(::-webkit-scrollbar) {
+    * { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) var(--scroll-track); }
+  }
+  ::-webkit-scrollbar { width: var(--scroll-size, 10px); height: var(--scroll-size, 10px); }
+  ::-webkit-scrollbar-track { background: var(--scroll-track-fill, var(--scroll-track)); }
+  ::-webkit-scrollbar-thumb { background: var(--scroll-fill, var(--scroll-thumb)); border: var(--scroll-border, 2px solid transparent);
+                              background-clip: padding-box; border-radius: 0; }
+  :root[data-theme="8bit"] ::-webkit-scrollbar-thumb { background-clip: border-box; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--scroll-hover); background-clip: padding-box; }
+  ::-webkit-scrollbar-corner { background: var(--scroll-track-fill, var(--scroll-track)); }
+  /* The usage row's resize grip: two diagonal ticks in the thumb colour */
+  ::-webkit-resizer {
+    background: linear-gradient(135deg, transparent 0 55%, var(--scroll-thumb) 55% 62%, transparent 62% 75%,
+                                var(--scroll-thumb) 75% 82%, transparent 82%);
   }
   * { box-sizing: border-box; }
   body { margin: 0; min-height: 100vh; color: var(--ink); background: var(--page-bg); background-color: var(--bg);
@@ -144,17 +184,28 @@
               filter: var(--title-glow); }
   /* Theme switcher: a small segmented control */
   .themes { display: inline-flex; border: 1px solid var(--line); justify-self: end; }
-  .themes button { border: none; padding: 3px 12px; }
+  .themes button { border: none; padding: 3px 12px; white-space: nowrap; }
   .themes button[aria-pressed="true"] { background: var(--chip); color: var(--ink); box-shadow: var(--glow-soft); }
+  .typeface { display: inline-flex; border: 1px solid var(--line); }
+  .typeface[hidden] { display: none; }
+  .typeface button { border: none; padding: 3px 10px; }
+  .typeface button[data-type-choice="serif"] { font-family: "Source Serif 4", Georgia, serif; }
+  .typeface button[aria-pressed="true"] { background: var(--chip); color: var(--ink); }
   .meta { color: var(--muted); font-size: 14px; justify-self: start; }
-  .stats { display: grid; gap: 12px; padding: 12px 12px 0; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
-  .tile { background: var(--panel); border: 1px solid var(--line); backdrop-filter: blur(6px); padding: 14px 16px; }
+  /* Usage row: as tall as the three number tiles by default; drag the corner grip to resize (height is saved) */
+  .stats { display: grid; gap: 12px; padding: 12px 12px 0; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+           resize: vertical; overflow: hidden; min-height: 64px; }
+  .tile { background: var(--panel); border: 1px solid var(--line); backdrop-filter: blur(6px); padding: 14px 16px;
+          min-height: 0; overflow: auto; }
+  /* size containment: the model list never sets the row height, it scrolls inside whatever the row gives it */
+  .tile.models-tile { contain: size; display: flex; flex-direction: column; overflow: hidden; }
   .tile .k { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
   .tile .v { font-size: 30px; font-weight: 600; margin-top: 4px; }
   .tile .s { font-size: 13px; color: var(--muted); }
-  .models { font-size: 14px; margin-top: 6px; max-height: 280px; overflow-y: auto; }
-  .models div { display: flex; justify-content: space-between; gap: 8px; padding: 1px 0; }
-  .models span:first-child { overflow-wrap: anywhere; }
+  .models { font-size: 14px; margin-top: 6px; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding-right: 4px; }
+  .models div { display: flex; justify-content: space-between; gap: 8px; padding: 1px 0; white-space: nowrap; }
+  .models span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .models span:last-child { flex: none; color: var(--muted); }
   .drawer-bg { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; z-index: 10; }
   .drawer-bg.open { display: block; }
   .drawer { position: fixed; top: 0; right: 0; height: 100%; width: min(520px, 100%); background: var(--drawer);
@@ -290,6 +341,10 @@
   <span class="meta" id="status">loading…</span>
   <h1>Agent Dashboard</h1>
   <div class="right">
+    <div class="typeface" role="group" aria-label="Typeface" hidden>
+      <button type="button" data-type-choice="sans" aria-pressed="true">Sans</button>
+      <button type="button" data-type-choice="serif" aria-pressed="false">Serif</button>
+    </div>
     <div class="themes" role="group" aria-label="Theme">
       <button type="button" data-theme-choice="ember" aria-pressed="false">Ember</button>
       <button type="button" data-theme-choice="walnut" aria-pressed="false">Walnut</button>
@@ -389,14 +444,14 @@ function renderStats(metrics) {
   const t = metrics.total;
   const coverage = metrics.costCoverage || {};
   const models = Object.entries(metrics.byModel || {}).map(([name, b]) =>
-    el("div", {}, [el("span", {}, name), el("span", {}, `${fmtUsd(b.usd)} · ${fmtTok(b.output)} out`)]));
+    el("div", {}, [el("span", { title: name }, name), el("span", {}, `${fmtUsd(b.usd)} · ${fmtTok(b.output)} out`)]));
   const sessionCount = metrics.sessionCount ?? Object.keys(metrics.sessions || {}).length;
   const costCoverage = `${coverage.pricedSessions || 0} sessions priced · ${coverage.unreportedSessions || 0} without cost data`;
   return [
     statTile("Recorded cost", fmtUsd(t.usd), costCoverage),
     statTile("Output tokens", fmtTok(t.output), `${fmtTok(t.input)} in · ${fmtTok(t.cacheRead)} cache read · ${fmtTok(t.cacheWrite)} cache write`),
     statTile("Messages", t.messages.toLocaleString(), `across ${sessionCount} agent sessions`),
-    el("div", { class: "tile" }, [el("div", { class: "k" }, "Cost by model"), el("div", { class: "models" }, models.length ? models : [el("div", {}, "no model usage recorded")])]),
+    el("div", { class: "tile models-tile" }, [el("div", { class: "k" }, "Cost by model"), el("div", { class: "models" }, models.length ? models : [el("div", {}, "no model usage recorded")])]),
   ];
 }
 
@@ -491,6 +546,20 @@ function cssVar(name) {
 
 // ---- Theme switching. The choice is a per-viewer preference, so localStorage is fine (wrapped in try/catch).
 const THEME_KEY = "agent-dashboard-theme";
+const TYPE_KEY = "agent-dashboard-typeface";
+const TYPE_THEMES = ["paper", "ink"];   // themes that offer the Sans / Serif switch
+function applyTypeface(type) {
+  type = type === "serif" ? "serif" : "sans";
+  document.documentElement.dataset.type = type;
+  for (const b of document.querySelectorAll("[data-type-choice]")) {
+    b.setAttribute("aria-pressed", String(b.dataset.typeChoice === type));
+  }
+  try { localStorage.setItem(TYPE_KEY, type); } catch (err) { /* unavailable */ }
+}
+for (const b of document.querySelectorAll("[data-type-choice]")) {
+  b.addEventListener("click", () => applyTypeface(b.dataset.typeChoice));
+}
+try { applyTypeface(localStorage.getItem(TYPE_KEY)); } catch (err) { applyTypeface("sans"); }
 function applyTheme(name) {
   if (name === "site") name = "ember";   // older saved name
   const theme = ["ember", "walnut", "space", "8bit", "paper", "ink"].includes(name) ? name : "ember";
@@ -499,6 +568,7 @@ function applyTheme(name) {
     b.setAttribute("aria-pressed", String(b.dataset.themeChoice === theme));
   }
   try { localStorage.setItem(THEME_KEY, theme); } catch (err) { /* private mode: keep the in-memory theme */ }
+  document.querySelector(".typeface").hidden = !TYPE_THEMES.includes(theme);
   // Re-theme an open terminal without losing its output.
   if (watch) { watch.term.options.theme = { background: cssVar("--term-bg"), foreground: cssVar("--ink") }; }
 }
@@ -508,6 +578,23 @@ for (const b of document.querySelectorAll("[data-theme-choice]")) {
 let savedTheme = null;
 try { savedTheme = localStorage.getItem(THEME_KEY); } catch (err) { /* unavailable */ }
 applyTheme(savedTheme || "ember");
+
+// ---- Usage row height. CSS resize does the dragging; a ResizeObserver only saves the height you leave it at.
+const STATS_KEY = "agent-dashboard-stats-height";
+const statsRow = document.getElementById("stats");
+try { const h = localStorage.getItem(STATS_KEY); if (h) statsRow.style.height = h; } catch (err) { /* unavailable */ }
+function saveStatsHeight() {
+  if (!statsRow.style.height) return;   // never dragged: keep the content-sized default
+  try { localStorage.setItem(STATS_KEY, statsRow.style.height); } catch (err) { /* unavailable */ }
+}
+if (window.ResizeObserver) new ResizeObserver(saveStatsHeight).observe(statsRow);
+window.addEventListener("mouseup", saveStatsHeight);   // end of a grip drag, also when frames are paused
+// Double-click the row's empty edges to go back to the content-sized default.
+statsRow.addEventListener("dblclick", e => {
+  if (e.target !== statsRow) return;
+  statsRow.style.height = "";
+  try { localStorage.removeItem(STATS_KEY); } catch (err) { /* unavailable */ }
+});
 
 // Initialize the only active dashboard layout.
 if (window.PlaneView && !isWatchPage()) {
