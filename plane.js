@@ -10,8 +10,10 @@
   const MIN_ZOOM = 0.35, MAX_ZOOM = 4;
   const REDUCED = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
   const KIND_RADIUS = { agent: 8.5, subagent: 6, web: 12, doc: 5, area: 9, tool: 6, msg: 5, skill: 5 };
-  const SKILL_SHELL = 0.6;       // skills sit on an inner stratum, this fraction of the resource shell's radius
+  const MD_SHELL = 1.4;          // every .md (skills included) sits on an outer shell, this many times the resource shell's radius
+  const AGENT_SHELL = 0.5;       // agents and subagents sit on an inner shell, this many times the resource shell's radius
   const FOLD_KEY = "agent-dashboard-folded";
+  const OUTLINE_KEY = "agent-dashboard-outline";   // sphere outline opacity, 0..100 percent
   const EDGE_COLOR = { call: "--working", spawn: "--blocked", message: "--done", reports: "--idle" };
   const MAX_LABELS = 40;
   const RECENT_PI_SUBAGENT_SECONDS = 120; // Give fast/completed child runs time to be noticed on the plane.
@@ -181,12 +183,18 @@
   function dot3(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
   function cross3(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
   function surfaceRadius() { return sceneRadius * 0.94; }
+  function agentShellRadius() { return surfaceRadius() * AGENT_SHELL; }
 
   function loadFolded() {
     try { return JSON.parse(localStorage.getItem(FOLD_KEY) || "[]"); } catch { return []; }
   }
   function saveFolded() {
     try { localStorage.setItem(FOLD_KEY, JSON.stringify([...folded])); } catch { /* storage blocked */ }
+  }
+
+  // Markdown is its own stratum: skills, and any file whose name ends in .md.
+  function isMarkdown(n) {
+    return n.kind === "skill" || (n.kind === "doc" && /\.md$/i.test(String(n.label || "")));
   }
 
   function resourceClusterKey(node) {
@@ -228,7 +236,7 @@
         const theta = i * golden + hash01(domain) * 0.18;
         v = [Math.cos(theta) * r, y, Math.sin(theta) * r];
       }
-      const p = normalize3(v).map(x => x * sceneRadius * 0.58);
+      const p = normalize3(v).map(x => x * agentShellRadius());
       sites.set(domain, p);
     });
     if (sorted.length === 1) sites.set(sorted[0], [0, 0, 0]);
@@ -264,7 +272,9 @@
   }
 
   function layoutScene() {
-    sceneRadius = Math.max(130, Math.min(width, height) * 0.46);
+    const hasMarkdown = [...nodes.values()].some(n => !n.gone && isMarkdown(n));
+    // leave room for the .md shell when there is one
+    sceneRadius = Math.max(130, Math.min(width, height) * 0.46 / (hasMarkdown ? 1.32 : 1));
     const agents = [...nodes.values()].filter(n => !n.gone && isAgent(n));
     const domains = agents.map(domainOf);
     domainSites = makeDomainSites(domains);
@@ -282,28 +292,41 @@
       }
       return depth;
     };
-    const orderedAgents = agents.sort((a, b) => depthOf(a) - depthOf(b));
-    for (const n of orderedAgents) {
-      const domain = domainOf(n), site = domainSites.get(domain) || [0,0,0];
-      let target;
-      if (n.kind === "subagent" && nodes.has(n.parent)) {
-        const parent = nodes.get(n.parent);
-        const offset = jitter3(n.id, sceneRadius * 0.15);
-        target = [parent.ax + offset[0], parent.ay + offset[1], parent.az + offset[2]];
-      } else {
-        const offset = jitter3(n.id, sceneRadius * (n.kind === "subagent" ? 0.16 : 0.25));
-        target = [site[0] + offset[0], site[1] + offset[1], site[2] + offset[2]];
-      }
-      [n.ax, n.ay, n.az] = target;
+    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+    // Agents spread evenly over the inner agent shell: one Fibonacci-sphere point each. Domains
+    // take turns claiming the free point nearest their site (a subagent: nearest its parent), so
+    // every runtime keeps a contiguous patch and children land beside their parents.
+    const fib = agents.map((_, i) => {
+      const y = 1 - 2 * (i + 0.5) / agents.length, r = Math.sqrt(Math.max(0, 1 - y * y)), t = i * goldenAngle;
+      return [Math.cos(t) * r, y, Math.sin(t) * r];
+    });
+    const queues = new Map();
+    for (const n of [...agents].sort((a, b) => depthOf(a) - depthOf(b) || String(a.id).localeCompare(String(b.id)))) {
+      const queue = queues.get(domainOf(n)) || [];
+      queue.push(n);
+      queues.set(domainOf(n), queue);
+    }
+    const free = new Set(fib.keys()), placed = new Map(), shell = agentShellRadius();
+    const order = [...queues.keys()].sort();
+    while (free.size) for (const domain of order) {
+      const n = queues.get(domain).shift();
+      if (!n) continue;
+      const parent = n.kind === "subagent" && placed.get(n.parent);
+      const site = domainSites.get(domain) || [0, 0, 0];
+      const anchor = parent || (Math.hypot(...site) > 1e-6 ? normalize3(site) : fib[0]);
+      let best = -1, bestDot = -Infinity;
+      for (const i of free) { const d = dot3(fib[i], anchor); if (d > bestDot) { bestDot = d; best = i; } }
+      free.delete(best);
+      placed.set(n.id, fib[best]);
+      [n.ax, n.ay, n.az] = fib[best].map(value => value * shell);
     }
     const resourceClusters = new Map();
-    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
-    // Skills spread evenly over their own inner shell (a Fibonacci sphere in id order).
+    // Skills spread evenly over the .md shell (a Fibonacci sphere in id order).
     const skills = [...nodes.values()].filter(n => n.kind === "skill" && !n.gone)
       .sort((a, b) => String(a.id).localeCompare(String(b.id)));
     skills.forEach((n, i) => {
       const y = 1 - 2 * (i + 0.5) / skills.length, r = Math.sqrt(Math.max(0, 1 - y * y)), t = i * goldenAngle;
-      const shell = surfaceRadius() * SKILL_SHELL;
+      const shell = surfaceRadius() * MD_SHELL;
       [n.ax, n.ay, n.az] = [Math.cos(t) * r * shell, y * shell, Math.sin(t) * r * shell];
       Object.assign(n, { surfaceCluster: null, surfaceClusterSize: skills.length, foldHidden: false, foldCount: 0 });
     });
@@ -345,7 +368,9 @@
           const angle = memberIndex * goldenAngle + hash01(cluster.key) * Math.PI * 2;
           const distance = memberSpread * Math.sqrt((memberIndex + 0.5) / memberCount);
           const point = sphericalPatchPoint(cluster.direction, angle, distance);
-          [n.ax, n.ay, n.az] = point.map(value => value * surfaceRadius());
+          // a .md keeps its place in its folder's patch, one stratum further out
+          const shell = surfaceRadius() * (isMarkdown(n) ? MD_SHELL : 1);
+          [n.ax, n.ay, n.az] = point.map(value => value * shell);
           n.surfaceCluster = cluster.key;
           n.surfaceClusterSize = memberCount;
           n.foldHidden = fold && memberIndex > 0;   // a folded cluster shows only its first member
@@ -473,7 +498,7 @@
     simAlpha = Math.max(simAlpha, 0.6);  // new data reheats the layout a little
   }
 
-  // Agents move inside their runtime domains. Resources form surface clusters by folder or
+  // Agents slide over the inner agent shell. Resources form surface clusters by folder or
   // tool family, arranged near the weighted center of the runtime spaces that use them.
   function step(now) {
     simAlpha = Math.max(0.02, simAlpha * 0.985);
@@ -537,20 +562,13 @@
       const speed = Math.hypot(n.vx, n.vy, n.vz);
       if (speed > maxV) { n.vx *= maxV / speed; n.vy *= maxV / speed; n.vz *= maxV / speed; }
       n.x += n.vx; n.y += n.vy; n.z += n.vz;
-      let center = domainSites.get(domainOf(n)) || [0,0,0], radius = sceneRadius * 0.52;
-      if (n.kind === "subagent" && nodes.has(n.parent)) {
-        const parent = nodes.get(n.parent);
-        center = [parent.x, parent.y, parent.z]; radius = sceneRadius * 0.24;
-      }
-      const off = [n.x - center[0], n.y - center[1], n.z - center[2]], distance = Math.hypot(...off);
-      if (distance > radius) {
-        const scale = radius / distance;
-        n.x = center[0] + off[0] * scale; n.y = center[1] + off[1] * scale; n.z = center[2] + off[2] * scale;
-      }
-      const sceneDistance = Math.hypot(n.x, n.y, n.z), sceneLimit = sceneRadius * 0.86;
-      if (sceneDistance > sceneLimit) {
-        const scale = sceneLimit / sceneDistance;
+      // forces only slide an agent along its shell: project back onto the agent sphere
+      const shellDistance = Math.hypot(n.x, n.y, n.z);
+      if (shellDistance > 1e-6) {
+        const scale = agentShellRadius() / shellDistance;
         n.x *= scale; n.y *= scale; n.z *= scale;
+      } else {
+        n.x = n.ax; n.y = n.ay; n.z = n.az;
       }
       n.dx += (n.x - n.dx) * 0.12; n.dy += (n.y - n.dy) * 0.12; n.dz += (n.z - n.dz) * 0.12;
     }
@@ -729,8 +747,8 @@
     return lower.concat(upper);
   }
 
-  // Two concentric wireframe shells (strata): the resource shell (solid, muted) and, when there are
-  // skills, the inner skill shell (dashed, in the accent colour the skill squares use). Each is an outline
+  // Concentric wireframe shells (strata): the inner agent shell (dotted), the resource shell (solid, muted) and,
+  // when there are any, the outer .md shell (dashed, in the accent colour). Each is an outline
   // plus rings that turn with the camera; the near half of every ring is brighter than the far half.
   const LAT = Math.SQRT1_2;   // latitude rings at ±45°
   const SHELL_RINGS = [
@@ -743,12 +761,17 @@
     t => [Math.cos(t) * LAT, -LAT, Math.sin(t) * LAT],
   ];
   function drawShells() {
-    const shells = [{ radius: surfaceRadius(), dash: [], alpha: 0.32, color: colors.muted, rings: SHELL_RINGS,
-                      label: "files · tools" }];
-    if ([...nodes.values()].some(n => !n.gone && n.kind === "skill")) {
-      shells.push({ radius: surfaceRadius() * SKILL_SHELL, dash: [3, 4], alpha: 0.5, color: colors.accent,
-                    rings: SKILL_RINGS, label: "skills" });
+    const shells = [{ radius: surfaceRadius(), dash: [], color: colors.muted, rings: SHELL_RINGS,
+                      label: "files \u00b7 tools" }];
+    if ([...nodes.values()].some(n => !n.gone && isAgent(n))) {
+      shells.unshift({ radius: agentShellRadius(), dash: [1, 3], color: colors.muted, rings: SHELL_RINGS,
+                       label: "agents" });
     }
+    if ([...nodes.values()].some(n => !n.gone && isMarkdown(n))) {
+      shells.push({ radius: surfaceRadius() * MD_SHELL, dash: [3, 4], color: colors.accent,
+                    rings: SKILL_RINGS, label: ".md \u00b7 skills" });
+    }
+    const alpha = outlineOpacity;
     const c = cameraPoint([0, 0, 0]);
     ctx.save();
     ctx.lineWidth = 0.9;
@@ -756,9 +779,9 @@
     for (const shell of shells) {
       const r = shell.radius * c.scale * view.k;
       ctx.setLineDash(shell.dash);
-      ctx.strokeStyle = withAlpha(shell.color, shell.alpha);
+      ctx.strokeStyle = withAlpha(shell.color, alpha);
       ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, Math.PI * 2); ctx.stroke();
-      ctx.fillStyle = withAlpha(shell.color, Math.min(1, shell.alpha + 0.3));
+      ctx.fillStyle = withAlpha(shell.color, 0.45 + alpha * 0.55);   // the names stay readable
       ctx.fillText(shell.label, c.x, c.y - r - 6);
       for (const ring of shell.rings) {
         const front = new Path2D(), back = new Path2D();
@@ -771,8 +794,8 @@
           }
           prev = p;
         }
-        ctx.strokeStyle = withAlpha(shell.color, shell.alpha * 0.8); ctx.stroke(front);
-        ctx.strokeStyle = withAlpha(shell.color, shell.alpha * 0.3); ctx.stroke(back);
+        ctx.strokeStyle = withAlpha(shell.color, alpha); ctx.stroke(front);
+        ctx.strokeStyle = withAlpha(shell.color, alpha * 0.4); ctx.stroke(back);
       }
     }
     ctx.restore();
@@ -1045,6 +1068,26 @@
   });
 
   const centerButton = wrap.querySelector('[data-camera-view="center"]');
+
+  // The Outline knob: opacity of both sphere wireframes, remembered per browser (default 1%).
+  const outlineInput = wrap.querySelector("#outline-opacity");
+  const outlineOutput = wrap.querySelector('output[for="outline-opacity"]');
+  let outlineOpacity = 0.01;
+  try {
+    const saved = parseFloat(localStorage.getItem(OUTLINE_KEY));
+    if (Number.isFinite(saved)) outlineOpacity = Math.max(0, Math.min(100, saved)) / 100;
+  } catch { /* storage blocked */ }
+  function showOutline() {
+    const percent = Math.round(outlineOpacity * 100);
+    if (outlineInput) outlineInput.value = String(percent);
+    if (outlineOutput) outlineOutput.textContent = percent + "%";
+  }
+  showOutline();
+  if (outlineInput) outlineInput.addEventListener("input", () => {
+    outlineOpacity = Number(outlineInput.value) / 100;
+    showOutline();
+    try { localStorage.setItem(OUTLINE_KEY, String(Math.round(outlineOpacity * 100))); } catch { /* storage blocked */ }
+  });
 
   function centerNode(node) {
     if (!node || node.gone) return;

@@ -12,8 +12,10 @@ background job.
 - **Six themes:** Ember, Walnut, Space, 8-Bit, Paper (black on white) and Ink (white on charcoal).
 - **Grouped resources.** Files are grouped by folder and tools by family, each group named on the
   graph. Click a group's name to fold it into one node with a count, and click again to spread it out.
-- **Skills on their own stratum.** A skill (its `SKILL.md`, anything under `skills/<name>/`, a
-  `MINISKILL.md`, or a `Skill` tool call) is one square on an inner sphere, inside the files and tools.
+- **Two strata.** Agents sit inside a sphere whose surface holds the files and tools they use. Every
+  `.md` file sits one stratum out, on a larger concentric sphere, in the same spot of its folder's
+  patch. Skills live there too, as squares: a skill's `SKILL.md`, anything under `skills/<name>/`, a
+  `MINISKILL.md`, and a `Skill` tool call are all one node.
 
 ## Requirements
 

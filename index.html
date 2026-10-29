@@ -255,6 +255,10 @@
   #camera-controls { position: absolute; top: 10px; right: 10px; display: flex; gap: 4px; z-index: 3; }
   #camera-controls button { border: 1px solid var(--line); padding: 5px 8px; color: var(--ink); background: var(--drawer); font: inherit; cursor: pointer; }
   #camera-controls button:hover, #camera-controls button:focus-visible { border-color: var(--accent); outline: 1px solid var(--accent); }
+  #camera-controls .outline-knob { display: flex; align-items: center; gap: 6px; border: 1px solid var(--line); padding: 2px 8px;
+                                  color: var(--muted); background: var(--drawer); font-size: 13px; white-space: nowrap; }
+  #camera-controls .outline-knob input { width: 84px; accent-color: var(--accent); }
+  #camera-controls .outline-knob output { min-width: 3.2ch; text-align: right; color: var(--ink); }
   /* Flow view: the calls along one clicked line, newest first */
   #flow-panel { position: absolute; top: 52px; right: 0; bottom: 0; width: min(380px, 100%); overflow-y: auto;
                 background: var(--drawer); border-left: 1px solid var(--line); padding: 14px; font-size: 14px; }
@@ -357,7 +361,7 @@
 </header>
 <div class="banner" id="banner"></div>
 <section class="stats" id="stats"></section>
-<section id="plane-wrap"><canvas id="plane" aria-label="Three-dimensional agent workflow field"></canvas><div id="camera-controls" role="group" aria-label="Camera orientation"><button type="button" data-camera-view="zenith" title="View from above">Zenith</button><button type="button" data-camera-view="nadir" title="View from below">Nadir</button><button type="button" data-camera-view="center" title="Center camera on the selected element" disabled>Center</button><button type="button" data-camera-view="reset" title="Reset camera">Reset</button></div><div id="plane-hint">each runtime has a domain · shared tools and files sit between domains that use them · cloud marks hosted work · drag to rotate · shift-drag to pan · ctrl-click agents or resources to compare · scroll to zoom · Center to orbit the selected node · double-click empty space to deselect</div></section>
+<section id="plane-wrap"><canvas id="plane" aria-label="Three-dimensional agent workflow field"></canvas><div id="camera-controls" role="group" aria-label="Camera orientation"><button type="button" data-camera-view="zenith" title="View from above">Zenith</button><button type="button" data-camera-view="nadir" title="View from below">Nadir</button><button type="button" data-camera-view="center" title="Center camera on the selected element" disabled>Center</button><button type="button" data-camera-view="reset" title="Reset camera">Reset</button><label class="outline-knob" title="Opacity of the sphere outlines">Outline <input type="range" id="outline-opacity" min="0" max="100" step="1" value="1" aria-label="Sphere outline opacity, percent"><output for="outline-opacity">1%</output></label></div><div id="plane-hint">each runtime has a domain · shared tools and files sit between domains that use them · cloud marks hosted work · drag to rotate · shift-drag to pan · ctrl-click agents or resources to compare · scroll to zoom · Center to orbit the selected node · double-click empty space to deselect</div></section>
 
 <div class="drawer-bg" id="drawer-bg">
   <aside class="drawer" id="drawer" role="dialog" aria-modal="true"></aside>
