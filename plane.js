@@ -9,7 +9,9 @@
   const LANES_MAX = 8;
   const MIN_ZOOM = 0.35, MAX_ZOOM = 4;
   const REDUCED = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const KIND_RADIUS = { agent: 8.5, subagent: 6, web: 12, doc: 5, area: 9, tool: 6, msg: 5 };
+  const KIND_RADIUS = { agent: 8.5, subagent: 6, web: 12, doc: 5, area: 9, tool: 6, msg: 5, skill: 5 };
+  const SKILL_SHELL = 0.6;       // skills sit on an inner stratum, this fraction of the resource shell's radius
+  const FOLD_KEY = "agent-dashboard-folded";
   const EDGE_COLOR = { call: "--working", spawn: "--blocked", message: "--done", reports: "--idle" };
   const MAX_LABELS = 40;
   const RECENT_PI_SUBAGENT_SECONDS = 120; // Give fast/completed child runs time to be noticed on the plane.
@@ -42,6 +44,9 @@
   let colors = {};
   let width = 0, height = 0, dpr = 1;
   let sceneRadius = 260;
+  let clusterLabels = [];     // [{key, x, y, w, h}] drawn this frame, for clicks
+  let hoverLabel = null;
+  const folded = new Set(loadFolded());   // cluster keys combined into one node
   let domainSites = new Map();
   let domainMeta = new Map();
   let simAlpha = 1;           // simulation heat: raised by new data, cooled every frame so the plane settles
@@ -73,7 +78,8 @@
     if (n.kind === "agent" || n.kind === "subagent") {
       return colors["state_" + (n.state || (n.kind === "subagent" ? "idle" : "other"))] || colors.state_other;
     }
-    return { web: colors.accent, doc: colors.ink, area: colors.accent, tool: colors.muted, msg: colors.edge_message }[n.kind] || colors.muted;
+    return { web: colors.accent, doc: colors.ink, area: colors.accent, tool: colors.muted, msg: colors.edge_message,
+             skill: colors.accent }[n.kind] || colors.muted;
   }
 
   function localPoint(e) {
@@ -175,6 +181,13 @@
   function dot3(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
   function cross3(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
   function surfaceRadius() { return sceneRadius * 0.94; }
+
+  function loadFolded() {
+    try { return JSON.parse(localStorage.getItem(FOLD_KEY) || "[]"); } catch { return []; }
+  }
+  function saveFolded() {
+    try { localStorage.setItem(FOLD_KEY, JSON.stringify([...folded])); } catch { /* storage blocked */ }
+  }
 
   function resourceClusterKey(node) {
     const group = String(node.group || "").toLowerCase();
@@ -284,8 +297,18 @@
       [n.ax, n.ay, n.az] = target;
     }
     const resourceClusters = new Map();
+    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+    // Skills spread evenly over their own inner shell (a Fibonacci sphere in id order).
+    const skills = [...nodes.values()].filter(n => n.kind === "skill" && !n.gone)
+      .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    skills.forEach((n, i) => {
+      const y = 1 - 2 * (i + 0.5) / skills.length, r = Math.sqrt(Math.max(0, 1 - y * y)), t = i * goldenAngle;
+      const shell = surfaceRadius() * SKILL_SHELL;
+      [n.ax, n.ay, n.az] = [Math.cos(t) * r * shell, y * shell, Math.sin(t) * r * shell];
+      Object.assign(n, { surfaceCluster: null, surfaceClusterSize: skills.length, foldHidden: false, foldCount: 0 });
+    });
     for (const n of nodes.values()) {
-      if (isAgent(n) || n.gone) continue;
+      if (isAgent(n) || n.gone || n.kind === "skill") continue;
       const key = resourceClusterKey(n);
       let cluster = resourceClusters.get(key);
       if (!cluster) resourceClusters.set(key, cluster = { key, members: [], weights: {} });
@@ -308,7 +331,6 @@
       peers.push(cluster);
       clustersByAffinity.set(cluster.affinity, peers);
     }
-    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
     for (const [affinity, clusters] of clustersByAffinity) {
       clusters.sort((a, b) => a.key.localeCompare(b.key));
       const cap = clusters.length < 2 ? 0 : Math.min(0.74, 0.12 + 0.11 * Math.sqrt(clusters.length));
@@ -317,7 +339,8 @@
         const clusterDistance = cap * Math.sqrt((clusterIndex + 0.5) / clusters.length);
         cluster.direction = sphericalPatchPoint(cluster.direction, clusterAngle, clusterDistance);
         const memberCount = cluster.members.length;
-        const memberSpread = memberCount < 2 ? 0 : Math.min(0.24, 0.045 * Math.sqrt(memberCount));
+        const fold = memberCount > 1 && folded.has(cluster.key);
+        const memberSpread = memberCount < 2 || fold ? 0 : Math.min(0.24, 0.045 * Math.sqrt(memberCount));
         cluster.members.forEach((n, memberIndex) => {
           const angle = memberIndex * goldenAngle + hash01(cluster.key) * Math.PI * 2;
           const distance = memberSpread * Math.sqrt((memberIndex + 0.5) / memberCount);
@@ -325,6 +348,8 @@
           [n.ax, n.ay, n.az] = point.map(value => value * surfaceRadius());
           n.surfaceCluster = cluster.key;
           n.surfaceClusterSize = memberCount;
+          n.foldHidden = fold && memberIndex > 0;   // a folded cluster shows only its first member
+          n.foldCount = fold && memberIndex === 0 ? memberCount : 0;
         });
       });
     }
@@ -548,7 +573,7 @@
   function nodeAt(sx, sy) {
     let best = null, bestD = 18;
     for (const n of nodes.values()) {
-      if (n.gone || !Number.isFinite(n.sx)) continue;
+      if (n.gone || n.foldHidden || !Number.isFinite(n.sx)) continue;
       const d = Math.hypot(n.sx - sx, n.sy - sy);
       if (d < bestD) { best = n; bestD = d; }
     }
@@ -704,6 +729,57 @@
     return lower.concat(upper);
   }
 
+  // Two concentric wireframe shells (strata): the resource shell (solid, muted) and, when there are
+  // skills, the inner skill shell (dashed, in the accent colour the skill squares use). Each is an outline
+  // plus rings that turn with the camera; the near half of every ring is brighter than the far half.
+  const LAT = Math.SQRT1_2;   // latitude rings at ±45°
+  const SHELL_RINGS = [
+    t => [Math.cos(t), 0, Math.sin(t)],     // equator
+    t => [Math.cos(t), Math.sin(t), 0],     // meridian through x
+    t => [0, Math.sin(t), Math.cos(t)],     // meridian through z
+  ];
+  const SKILL_RINGS = [...SHELL_RINGS,
+    t => [Math.cos(t) * LAT, LAT, Math.sin(t) * LAT],
+    t => [Math.cos(t) * LAT, -LAT, Math.sin(t) * LAT],
+  ];
+  function drawShells() {
+    const shells = [{ radius: surfaceRadius(), dash: [], alpha: 0.32, color: colors.muted, rings: SHELL_RINGS,
+                      label: "files · tools" }];
+    if ([...nodes.values()].some(n => !n.gone && n.kind === "skill")) {
+      shells.push({ radius: surfaceRadius() * SKILL_SHELL, dash: [3, 4], alpha: 0.5, color: colors.accent,
+                    rings: SKILL_RINGS, label: "skills" });
+    }
+    const c = cameraPoint([0, 0, 0]);
+    ctx.save();
+    ctx.lineWidth = 0.9;
+    ctx.font = "10px system-ui, sans-serif"; ctx.textAlign = "center";
+    for (const shell of shells) {
+      const r = shell.radius * c.scale * view.k;
+      ctx.setLineDash(shell.dash);
+      ctx.strokeStyle = withAlpha(shell.color, shell.alpha);
+      ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = withAlpha(shell.color, Math.min(1, shell.alpha + 0.3));
+      ctx.fillText(shell.label, c.x, c.y - r - 6);
+      for (const ring of shell.rings) {
+        const front = new Path2D(), back = new Path2D();
+        let prev = null;
+        for (let i = 0; i <= 96; i++) {
+          const p = cameraPoint(ring(i / 96 * Math.PI * 2).map(v => v * shell.radius));
+          if (prev) {
+            const path = prev.depth + p.depth > 0 ? front : back;
+            path.moveTo(prev.x, prev.y); path.lineTo(p.x, p.y);
+          }
+          prev = p;
+        }
+        ctx.strokeStyle = withAlpha(shell.color, shell.alpha * 0.8); ctx.stroke(front);
+        ctx.strokeStyle = withAlpha(shell.color, shell.alpha * 0.3); ctx.stroke(back);
+      }
+    }
+    ctx.restore();
+  }
+
+  // Each folder or tool family with two or more members gets a faint hull and a name. Clicking the
+  // name folds the group into one node with a count, and clicking it again spreads it back out.
   function drawResourceClusterHints() {
     const clusters = new Map();
     for (const n of nodes.values()) {
@@ -712,37 +788,77 @@
       members.push(n);
       clusters.set(n.surfaceCluster, members);
     }
+    clusterLabels = [];
     ctx.save();
     ctx.globalAlpha = 1;
     ctx.lineCap = "round";
-    for (const members of clusters.values()) {
-      if (members.length < 2) continue;
-      const points = members.map(n => ({ x: n.sx, y: n.sy }));
+    // Biggest groups claim label space first; a label that would overlap one already drawn waits
+    // until you hover its group (or it is folded).
+    const ordered = [...clusters].filter(([, members]) => members.length >= 2)
+      .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+    for (const [key, members] of ordered) {
       const colorWeights = {};
       for (const n of members) for (const [domain, weight] of Object.entries(n.domainWeights || {})) {
         colorWeights[domain] = (colorWeights[domain] || 0) + Number(weight || 0);
       }
       const dominant = Object.keys(colorWeights).sort((a, b) => colorWeights[b] - colorWeights[a])[0];
       const color = dominant ? domainColor(dominant) : colors.line;
-      if (points.length === 2) {
+      const isFolded = folded.has(key);
+      const shown = isFolded ? members.filter(n => !n.foldHidden) : members;
+      const points = shown.map(n => ({ x: n.sx, y: n.sy }));
+      if (!isFolded && points.length === 2) {
         ctx.beginPath(); ctx.moveTo(points[0].x, points[0].y); ctx.lineTo(points[1].x, points[1].y);
         ctx.strokeStyle = withAlpha(color, 0.075); ctx.lineWidth = 8; ctx.stroke();
         ctx.strokeStyle = withAlpha(color, 0.2); ctx.lineWidth = 0.8; ctx.stroke();
-        continue;
+      } else if (!isFolded) {
+        const hull = convexHull2D(points);
+        const center = points.reduce((sum, point) => ({ x: sum.x + point.x / points.length, y: sum.y + point.y / points.length }), { x: 0, y: 0 });
+        const padded = hull.map(point => {
+          const dx = point.x - center.x, dy = point.y - center.y, length = Math.hypot(dx, dy) || 1;
+          return { x: point.x + dx / length * 7, y: point.y + dy / length * 7 };
+        });
+        ctx.beginPath(); ctx.moveTo(padded[0].x, padded[0].y);
+        for (let i = 1; i < padded.length; i++) ctx.lineTo(padded[i].x, padded[i].y);
+        ctx.closePath();
+        ctx.fillStyle = withAlpha(color, 0.022); ctx.fill();
+        ctx.strokeStyle = withAlpha(color, 0.2); ctx.lineWidth = 0.85; ctx.stroke();
       }
-      const hull = convexHull2D(points);
-      const center = points.reduce((sum, point) => ({ x: sum.x + point.x / points.length, y: sum.y + point.y / points.length }), { x: 0, y: 0 });
-      const padded = hull.map(point => {
-        const dx = point.x - center.x, dy = point.y - center.y, length = Math.hypot(dx, dy) || 1;
-        return { x: point.x + dx / length * 7, y: point.y + dy / length * 7 };
-      });
-      ctx.beginPath(); ctx.moveTo(padded[0].x, padded[0].y);
-      for (let i = 1; i < padded.length; i++) ctx.lineTo(padded[i].x, padded[i].y);
-      ctx.closePath();
-      ctx.fillStyle = withAlpha(color, 0.022); ctx.fill();
-      ctx.strokeStyle = withAlpha(color, 0.2); ctx.lineWidth = 0.85; ctx.stroke();
+      // name above the group, brighter toward the front
+      const top = points.reduce((best, point) => (point.y < best.y ? point : best), points[0]);
+      const left = Math.min(...points.map(point => point.x)), right = Math.max(...points.map(point => point.x));
+      const depth = shown.reduce((sum, n) => sum + n.depth, 0) / shown.length;
+      const near = Math.max(0, Math.min(1, (depth / sceneRadius + 1) / 2));
+      const text = `${truncate(members[0].groupLabel || members[0].group || key, 22)} · ${members.length}`;
+      ctx.font = "10px system-ui, sans-serif";
+      const w = ctx.measureText(text).width, h = 12;
+      const x = (left + right) / 2 - w / 2, y = top.y - (isFolded ? 22 : 14) - h;
+      const hot = hoverLabel === key;
+      const asked = hot || isFolded || (hover && hover.surfaceCluster === key);
+      const overlaps = clusterLabels.some(l => x < l.x + l.w && x + w > l.x && y < l.y + l.h && y + h > l.y);
+      if (overlaps && !asked) continue;
+      ctx.globalAlpha = hot ? 1 : 0.3 + 0.5 * near;
+      ctx.fillStyle = hot ? colors.ink : isFolded ? withAlpha(color, 0.95) : colors.muted;
+      ctx.fillText(text, x, y + 10);
+      if (hot || isFolded) ctx.fillRect(x, y + h + 1, w, hot ? 1 : 0.6);
+      ctx.globalAlpha = 1;
+      clusterLabels.push({ key, x: x - 3, y: y - 2, w: w + 6, h: h + 5 });
     }
     ctx.restore();
+  }
+
+  function clusterLabelAt(sx, sy) {
+    for (let i = clusterLabels.length - 1; i >= 0; i--) {
+      const l = clusterLabels[i];
+      if (sx >= l.x && sx <= l.x + l.w && sy >= l.y && sy <= l.y + l.h) return l.key;
+    }
+    return null;
+  }
+
+  function toggleFold(key) {
+    if (folded.has(key)) folded.delete(key); else folded.add(key);
+    saveFolded();
+    layoutScene();
+    simAlpha = Math.max(simAlpha, 0.3);
   }
 
   function draw(now) {
@@ -755,6 +871,7 @@
     }
     drawCellMesh();
     drawDomains();
+    drawShells();
     drawResourceClusterHints();
 
     ctx.globalCompositeOperation = colors.crisp ? "source-over" : "lighter";
@@ -782,12 +899,12 @@
 
     const agents = [...nodes.values()].filter(n => isAgent(n) && !n.gone);
     const crowded = agents.length > MAX_LABELS;
-    const drawNodes = [...nodes.values()].filter(n => !n.gone).sort((a, b) => a.depth - b.depth);
+    const drawNodes = [...nodes.values()].filter(n => !n.gone && !n.foldHidden).sort((a, b) => a.depth - b.depth);
     for (const n of drawNodes) {
       const life = Math.min(1, (now - n.born) / 600);
       if (life <= 0) continue;
       const agent = isAgent(n);
-      const radius = radiusOf(n) * Math.max(0.72, Math.min(1.3, n.projectScale || 1));
+      const radius = (radiusOf(n) + (n.foldCount ? 4 : 0)) * Math.max(0.72, Math.min(1.3, n.projectScale || 1));
       const color = nodeColor(n), outline = agent ? domainColor(domainOf(n)) : colors.line;
       const selected = selectedItems.has(n.id) || selectedAgent === n.id;
       ctx.globalAlpha = life * (agent ? 1 : colors.crisp ? 0.75 : 0.4);
@@ -797,10 +914,22 @@
       }
       ctx.globalCompositeOperation = "source-over";
       ctx.fillStyle = agent && colors.agentFill ? colors.agentFill : color;
-      ctx.beginPath(); ctx.arc(n.sx, n.sy, radius, 0, Math.PI * 2); ctx.fill();
       ctx.strokeStyle = n === hover ? colors.ink : selected ? colors.accent : outline;
       ctx.lineWidth = n === hover || selected ? 2.5 : agent ? colors.agentRing : 0.8;
-      ctx.beginPath(); ctx.arc(n.sx, n.sy, radius + (n === hover || selected ? 3 : 1), 0, Math.PI * 2); ctx.stroke();
+      if (n.kind === "skill") {   // skills are squares, so their shell reads as its own layer
+        const pad = n === hover || selected ? 3 : 1;
+        ctx.fillRect(n.sx - radius, n.sy - radius, radius * 2, radius * 2);
+        ctx.strokeRect(n.sx - radius - pad, n.sy - radius - pad, (radius + pad) * 2, (radius + pad) * 2);
+      } else {
+        ctx.beginPath(); ctx.arc(n.sx, n.sy, radius, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(n.sx, n.sy, radius + (n === hover || selected ? 3 : 1), 0, Math.PI * 2); ctx.stroke();
+      }
+      if (n.foldCount) {   // a folded group: its member count inside the node
+        ctx.globalAlpha = life;
+        ctx.font = "bold 10px system-ui, sans-serif"; ctx.textAlign = "center";
+        ctx.fillStyle = colors.bg;
+        ctx.fillText(String(n.foldCount), n.sx, n.sy + 3.5);
+      }
       if (agent) drawAgentLogo(ctx, n.sx, n.sy, Math.max(8, Math.min(16, radius * 1.42)), agentBrand(n), true);
       if (n.cloud || n.environment === "cloud") drawCloudIcon(n.sx + radius * 0.78, n.sy - radius * 0.82, 13, outline);
       if (agent && n !== hover && (!crowded || (n.tier !== null && n.tier <= 1))) {
@@ -891,9 +1020,10 @@
         return;
       }
     }
-    hover = nodeAt(pointer.sx, pointer.sy);
-    const onEdge = !hover && edgeAt(pointer.sx, pointer.sy);
-    canvas.style.cursor = hover || onEdge ? "pointer" : "default";
+    hoverLabel = clusterLabelAt(pointer.sx, pointer.sy);
+    hover = hoverLabel ? null : nodeAt(pointer.sx, pointer.sy);
+    const onEdge = !hover && !hoverLabel && edgeAt(pointer.sx, pointer.sy);
+    canvas.style.cursor = hover || hoverLabel || onEdge ? "pointer" : "default";
   });
 
   canvas.addEventListener("pointerup", () => {
@@ -901,10 +1031,12 @@
     drag = null;
   });
   canvas.addEventListener("pointercancel", () => { drag = null; dragged = false; });
-  canvas.addEventListener("pointerleave", () => { if (!drag) { hover = null; pointer = null; } });
+  canvas.addEventListener("pointerleave", () => { if (!drag) { hover = null; hoverLabel = null; pointer = null; } });
 
   canvas.addEventListener("click", e => {
     if (dragged) { dragged = false; return; }  // a pan is not a click
+    const label = pointer && clusterLabelAt(pointer.sx, pointer.sy);
+    if (label) { toggleFold(label); return; }
     if (hover && (e.ctrlKey || e.metaKey)) { toggleNodeSelection(hover); return; }
     if (hover && isAgent(hover)) { selectAgent(hover); return; }
     if (hover) { selectNodeInfo(hover); return; }
@@ -1357,6 +1489,7 @@
       for (let i = 0; i < frames; i++) step(now += 16);
       draw(now);
     },
+    _labels() { return clusterLabels.map(l => ({ ...l })); },
     init(options) {
       onOpen = options.onOpen || onOpen;
       onWatch = options.onWatch || onWatch;

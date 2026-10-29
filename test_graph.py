@@ -257,6 +257,16 @@ class ParseFile(unittest.TestCase):
             self.assertEqual((node["id"], node["label"], node["detail"]), ("area:shared", "inbox", "inbox/notes/a.md"))
             self.assertEqual(graph.shared_target_from_input({"command": f"cat {shared}/x.md"})["id"], "area:shared")
 
+    def test_skill_files_and_skill_tool_share_one_skill_node(self):
+        home = Path(tempfile.mkdtemp())
+        ids = {graph.document_target(home / ".claude" / "skills" / "exa" / "SKILL.md")["id"],
+               graph.document_target(home / ".agents" / "skills" / "exa" / "references" / "api.md")["id"],
+               graph.target_of("Skill", {"skill": "plugin:exa"})["id"]}
+        self.assertEqual(ids, {"skill:exa"})
+        self.assertEqual(graph.document_target(home / "repo" / "MINISKILL.md")["kind"], "skill")
+        self.assertEqual(graph.document_target(home / "repo" / "src" / "main.py")["kind"], "doc")
+        self.assertEqual(graph.target_of("Skill", {})["id"], "tool:Skill")
+
 
 if __name__ == "__main__":
     unittest.main()

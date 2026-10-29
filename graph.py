@@ -30,7 +30,7 @@ import re
 import threading
 import time
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from paths import CODEX_SESSIONS_DIR, PI_SESSIONS_DIR, PROJECTS_DIR, ROSTER_DIR, SHARED_DIR
 GRAPH_WINDOW_S = 6 * 3600   # only transcripts touched in the last 6 h
@@ -180,11 +180,36 @@ def _shared_relative(path, root):
         return name
 
 
+SKILL_FILES = {"skill.md", "miniskill.md"}
+
+
+def skill_target(name):
+    """One node per skill, whether it was invoked with the Skill tool or its files were read."""
+    name = str(name).rsplit(":", 1)[-1].strip() or "skill"
+    return {"id": "skill:" + name.casefold(), "kind": "skill", "label": name,
+            "group": "skills", "groupLabel": "skills"}
+
+
+def _skill_name(path):
+    """The skill a path belongs to: a SKILL.md/MINISKILL.md's folder, or <name> in .../skills/<name>/..."""
+    parts = PurePath(str(path).replace("\\", "/")).parts
+    if len(parts) >= 2 and parts[-1].casefold() in SKILL_FILES:
+        return parts[-2]
+    folded = [p.casefold() for p in parts]
+    for i in range(len(parts) - 2, 0, -1):      # innermost skills/ folder wins
+        if folded[i - 1] == "skills":
+            return parts[i]
+    return None
+
+
 def document_target(path, cwd=None):
-    """Build a normalized file node, or the shared area for a file in SHARED_DIR."""
+    """Build a normalized file node, the shared area for a file in SHARED_DIR, or the skill it belongs to."""
     shared = _shared_target(path, cwd)
     if shared:
         return shared
+    skill = _skill_name(path)
+    if skill:
+        return skill_target(skill)
     normalized = _path_key(path, cwd)
     p = Path(normalized)
     parent = p.parent
@@ -312,6 +337,8 @@ def target_of(name, inp):
     if name in DOC_TOOLS:
         path = inp.get("file_path") or inp.get("notebook_path") or "document"
         return {**document_target(path), "edge": "call"}
+    if name == "Skill" and (inp.get("skill") or inp.get("command")):
+        return {**skill_target(inp.get("skill") or inp.get("command")), "edge": "call"}
     if name == "SendMessage":
         to = inp.get("to") or inp.get("recipient") or "agent"
         return {"id": f"msg:{to}", "kind": "msg", "label": str(to), "group": "msg",
