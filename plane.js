@@ -11,7 +11,7 @@
   const REDUCED = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
   const KIND_RADIUS = { agent: 8.5, subagent: 6, web: 12, doc: 5, area: 9, tool: 6, msg: 5, skill: 5 };
   const MD_SHELL = 1.4;          // every .md (skills included) sits on an outer shell, this many times the resource shell's radius
-  const AGENT_SHELL = 0.5;       // agents and subagents sit on an inner shell, this many times the resource shell's radius
+  const AGENT_SHELL = 0.5;       // runtime directions sit at this many times the resource shell's radius (sets the dividing planes)
   const FOLD_KEY = "agent-dashboard-folded";
   const OUTLINE_KEY = "agent-dashboard-outline";   // sphere outline opacity, 0..100 percent
   const EDGE_COLOR = { call: "--working", spawn: "--blocked", message: "--done", reports: "--idle" };
@@ -46,8 +46,9 @@
   let colors = {};
   let width = 0, height = 0, dpr = 1;
   let sceneRadius = 260;
-  let agentWander = 0.1;       // radians an agent may slide from its spot on the agent shell
+  let agentWander = 0.35;      // radians an agent may slide from its spot on its runtime's sphere
   let agentSpacingPx = 20;     // agents closer than this push apart
+  let domainBalls = new Map(); // runtime -> {center, radius}: the small sphere its agents sit on
   let clusterLabels = [];     // [{key, x, y, w, h}] drawn this frame, for clicks
   let hoverLabel = null;
   const folded = new Set(loadFolded());   // cluster keys combined into one node
@@ -295,11 +296,13 @@
       return depth;
     };
     const goldenAngle = Math.PI * (3 - Math.sqrt(5));
-    // Each runtime packs its agents into a tight sunflower patch around its own direction on the
-    // agent shell, so it stays on its side of the plane between runtimes. Neighbours sit about one
-    // node apart; a crowded runtime packs tighter rather than spill past the halfway line to its
-    // nearest neighbouring runtime. Subagents ring their parent.
-    const shell = agentShellRadius();
+    // Each runtime gets a small sphere of its own, sitting just on its side of the dividing plane(s)
+    // between runtimes (in the middle when there is only one). Its agents spread evenly over that
+    // sphere's surface about one node apart, so the sphere grows with its agent count. Subagents come
+    // right after their parent in the spiral order, so they land near it.
+    const spacing = 2.6 * KIND_RADIUS.agent;   // px between neighbouring agents
+    agentSpacingPx = spacing * 0.9;
+    const byId = (a, b) => String(a.id).localeCompare(String(b.id));
     const domainDir = domain => {
       const site = domainSites.get(domain) || [0, 0, 0];
       return Math.hypot(...site) > 1e-6 ? normalize3(site) : [0, 0, 1];
@@ -310,35 +313,37 @@
       list.push(n);
       byDomain.set(domainOf(n), list);
     }
-    const nodeSpacing = 1.5 * KIND_RADIUS.agent / Math.max(1, shell);   // sunflower step, radians
-    agentWander = nodeSpacing * 0.45;
-    agentSpacingPx = nodeSpacing * 1.7 * shell;
+    domainBalls = new Map();
     for (const [domain, list] of byDomain) {
+      const radius = Math.max(spacing * 0.8, spacing * Math.sqrt(list.length / (4 * Math.PI)));
+      // step back from each dividing plane: the sum of the planes' normals, pointing to our side
       const dir = domainDir(domain);
-      let half = Math.PI * 0.9;   // angular room up to the halfway line with the nearest other runtime
+      let away = [0, 0, 0];
       for (const other of byDomain.keys()) if (other !== domain) {
-        half = Math.min(half, Math.acos(Math.max(-1, Math.min(1, dot3(dir, domainDir(other))))) / 2);
+        const normal = normalize3(dir.map((value, i) => value - domainDir(other)[i]));
+        away = away.map((value, i) => value + normal[i]);
       }
-      const ids = new Set(list.map(n => n.id));
-      const roots = list.filter(n => !(n.kind === "subagent" && ids.has(n.parent)))
-        .sort((a, b) => String(a.id).localeCompare(String(b.id)));
-      const room = Math.max(0.05, half - agentWander - nodeSpacing);
-      const step = Math.min(nodeSpacing, room / Math.sqrt(Math.max(1, roots.length)));
-      const placed = new Map();
-      roots.forEach((n, i) => placed.set(n.id, sphericalPatchPoint(dir, i * goldenAngle, step * Math.sqrt(i))));
-      const rootIds = new Set(roots.map(n => n.id)), ring = new Map();
-      const kids = list.filter(n => !rootIds.has(n.id))
-        .sort((a, b) => depthOf(a) - depthOf(b) || String(a.id).localeCompare(String(b.id)));
-      for (const n of kids) {
-        const j = ring.get(n.parent) || 0;
-        ring.set(n.parent, j + 1);
-        placed.set(n.id, sphericalPatchPoint(placed.get(n.parent) || dir, j * goldenAngle + hash01(n.parent) * Math.PI * 2,
-                                             step * 0.6 * Math.sqrt(j + 1)));
+      const center = Math.hypot(...away) > 1e-6 ? normalize3(away).map(value => value * (radius + spacing * 0.6)) : [0, 0, 0];
+      domainBalls.set(domain, { center, radius });
+      const ids = new Set(list.map(n => n.id)), children = new Map();
+      for (const n of list) if (n.kind === "subagent" && ids.has(n.parent)) {
+        if (!children.has(n.parent)) children.set(n.parent, []);
+        children.get(n.parent).push(n);
       }
-      for (const n of list) {
-        n.anchorDir = placed.get(n.id);
-        [n.ax, n.ay, n.az] = n.anchorDir.map(value => value * shell);
-      }
+      const ordered = [], seen = new Set();
+      const visit = n => {
+        if (seen.has(n.id)) return;
+        seen.add(n.id); ordered.push(n);
+        for (const child of (children.get(n.id) || []).sort(byId)) visit(child);
+      };
+      list.filter(n => !(n.kind === "subagent" && ids.has(n.parent))).sort(byId).forEach(visit);
+      list.sort(byId).forEach(visit);   // anything left (a parent loop) still gets a spot
+      ordered.forEach((n, i) => {
+        const y = 1 - 2 * (i + 0.5) / ordered.length, r = Math.sqrt(Math.max(0, 1 - y * y)), t = i * goldenAngle;
+        n.anchorDir = [Math.cos(t) * r, y, Math.sin(t) * r];
+        n.ball = domain;
+        [n.ax, n.ay, n.az] = n.anchorDir.map((value, k) => center[k] + value * radius);
+      });
     }
     const resourceClusters = new Map();
     // Skills spread evenly over the .md shell (a Fibonacci sphere in id order).
@@ -582,21 +587,17 @@
       const speed = Math.hypot(n.vx, n.vy, n.vz);
       if (speed > maxV) { n.vx *= maxV / speed; n.vy *= maxV / speed; n.vz *= maxV / speed; }
       n.x += n.vx; n.y += n.vy; n.z += n.vz;
-      // forces only slide an agent along its shell: project back onto the agent sphere
-      const shellDistance = Math.hypot(n.x, n.y, n.z);
-      if (shellDistance > 1e-6) {
-        const scale = agentShellRadius() / shellDistance;
-        n.x *= scale; n.y *= scale; n.z *= scale;
-        // and only a little way from its spot, so a runtime's patch stays tight and on its side
-        if (n.anchorDir) {
-          const dir = [n.x / agentShellRadius(), n.y / agentShellRadius(), n.z / agentShellRadius()];
-          const c = Math.max(-1, Math.min(1, dot3(dir, n.anchorDir)));
-          if (Math.acos(c) > agentWander) {
-            const perp = normalize3(dir.map((value, i) => value - n.anchorDir[i] * c));
-            const r = agentShellRadius();
-            [n.x, n.y, n.z] = n.anchorDir.map((value, i) => (value * Math.cos(agentWander) + perp[i] * Math.sin(agentWander)) * r);
-          }
+      // forces only slide an agent over its runtime's sphere, and only a little way from its spot
+      const ball = domainBalls.get(n.ball);
+      if (ball && n.anchorDir) {
+        const off = [n.x - ball.center[0], n.y - ball.center[1], n.z - ball.center[2]];
+        let dir = Math.hypot(...off) > 1e-6 ? normalize3(off) : n.anchorDir;
+        const c = Math.max(-1, Math.min(1, dot3(dir, n.anchorDir)));
+        if (Math.acos(c) > agentWander) {
+          const perp = normalize3(dir.map((value, i) => value - n.anchorDir[i] * c));
+          dir = n.anchorDir.map((value, i) => value * Math.cos(agentWander) + perp[i] * Math.sin(agentWander));
         }
+        [n.x, n.y, n.z] = dir.map((value, i) => ball.center[i] + value * ball.radius);
       } else {
         n.x = n.ax; n.y = n.ay; n.z = n.az;
       }
@@ -748,7 +749,9 @@
   function drawDomains() {
     for (const [domain, site] of domainSites) {
       const color = domainColor(domain), meta = domainMeta.get(domain) || { count: 0, cloud: false };
-      const labelPoint = cameraPoint([site[0], site[1] - sceneRadius * 0.28, site[2]]);
+      const ball = domainBalls.get(domain);   // the name sits just above the runtime's own sphere
+      const labelPoint = ball ? cameraPoint([ball.center[0], ball.center[1] - ball.radius - 16, ball.center[2]])
+                              : cameraPoint([site[0], site[1] - sceneRadius * 0.28, site[2]]);
       ctx.font = "600 11px system-ui, sans-serif";
       ctx.textAlign = "center";
       ctx.fillStyle = withAlpha(color, 0.94);
@@ -793,33 +796,35 @@
   function drawShells() {
     const shells = [{ radius: surfaceRadius(), dash: [], color: colors.muted, rings: SHELL_RINGS,
                       label: "files \u00b7 tools" }];
-    if ([...nodes.values()].some(n => !n.gone && isAgent(n))) {
-      shells.unshift({ radius: agentShellRadius(), dash: [1, 3], color: colors.muted, rings: SHELL_RINGS,
-                       label: "agents" });
+    for (const [domain, ball] of domainBalls) {
+      shells.unshift({ center: ball.center, radius: ball.radius, dash: [], color: domainColor(domain), rings: SHELL_RINGS,
+                       label: "" });
     }
     if ([...nodes.values()].some(n => !n.gone && isMarkdown(n))) {
       shells.push({ radius: surfaceRadius() * MD_SHELL, dash: [3, 4], color: colors.accent,
                     rings: SKILL_RINGS, label: ".md \u00b7 skills" });
     }
     const alpha = outlineOpacity;
-    const c = cameraPoint([0, 0, 0]);
     ctx.save();
     ctx.lineWidth = 0.9;
     ctx.font = "10px system-ui, sans-serif"; ctx.textAlign = "center";
     for (const shell of shells) {
+      const center = shell.center || [0, 0, 0], c = cameraPoint(center);
       const r = shell.radius * c.scale * view.k;
       ctx.setLineDash(shell.dash);
       ctx.strokeStyle = withAlpha(shell.color, alpha);
       ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, Math.PI * 2); ctx.stroke();
-      ctx.fillStyle = withAlpha(shell.color, 0.45 + alpha * 0.55);   // the names stay readable
-      ctx.fillText(shell.label, c.x, c.y - r - 6);
+      if (shell.label) {
+        ctx.fillStyle = withAlpha(shell.color, 0.45 + alpha * 0.55);   // the names stay readable
+        ctx.fillText(shell.label, c.x, c.y - r - 6);
+      }
       for (const ring of shell.rings) {
         const front = new Path2D(), back = new Path2D();
         let prev = null;
         for (let i = 0; i <= 96; i++) {
-          const p = cameraPoint(ring(i / 96 * Math.PI * 2).map(v => v * shell.radius));
+          const p = cameraPoint(ring(i / 96 * Math.PI * 2).map((v, k) => center[k] + v * shell.radius));
           if (prev) {
-            const path = prev.depth + p.depth > 0 ? front : back;
+            const path = prev.depth + p.depth > 2 * c.depth ? front : back;   // near half of this shell
             path.moveTo(prev.x, prev.y); path.lineTo(p.x, p.y);
           }
           prev = p;
@@ -988,7 +993,7 @@
       if (agent && n !== hover && (!crowded || (n.tier !== null && n.tier <= 1))) {
         ctx.font = n.kind === "subagent" ? "10px system-ui, sans-serif" : "11px system-ui, sans-serif";
         ctx.textAlign = "center"; ctx.fillStyle = colors.muted;
-        ctx.fillText(truncate(n.name || n.label || "", 24), n.sx, n.sy + radius + 13);
+        ctx.fillText(String(n.name || n.label || "").slice(0, 4), n.sx, n.sy + radius + 13);   // full name on hover
       }
       ctx.globalAlpha = 1;
     }
