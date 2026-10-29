@@ -46,6 +46,8 @@
   let colors = {};
   let width = 0, height = 0, dpr = 1;
   let sceneRadius = 260;
+  let agentWander = 0.1;       // radians an agent may slide from its spot on the agent shell
+  let agentSpacingPx = 20;     // agents closer than this push apart
   let clusterLabels = [];     // [{key, x, y, w, h}] drawn this frame, for clicks
   let hoverLabel = null;
   const folded = new Set(loadFolded());   // cluster keys combined into one node
@@ -293,32 +295,50 @@
       return depth;
     };
     const goldenAngle = Math.PI * (3 - Math.sqrt(5));
-    // Agents spread evenly over the inner agent shell: one Fibonacci-sphere point each. Domains
-    // take turns claiming the free point nearest their site (a subagent: nearest its parent), so
-    // every runtime keeps a contiguous patch and children land beside their parents.
-    const fib = agents.map((_, i) => {
-      const y = 1 - 2 * (i + 0.5) / agents.length, r = Math.sqrt(Math.max(0, 1 - y * y)), t = i * goldenAngle;
-      return [Math.cos(t) * r, y, Math.sin(t) * r];
-    });
-    const queues = new Map();
-    for (const n of [...agents].sort((a, b) => depthOf(a) - depthOf(b) || String(a.id).localeCompare(String(b.id)))) {
-      const queue = queues.get(domainOf(n)) || [];
-      queue.push(n);
-      queues.set(domainOf(n), queue);
-    }
-    const free = new Set(fib.keys()), placed = new Map(), shell = agentShellRadius();
-    const order = [...queues.keys()].sort();
-    while (free.size) for (const domain of order) {
-      const n = queues.get(domain).shift();
-      if (!n) continue;
-      const parent = n.kind === "subagent" && placed.get(n.parent);
+    // Each runtime packs its agents into a tight sunflower patch around its own direction on the
+    // agent shell, so it stays on its side of the plane between runtimes. Neighbours sit about one
+    // node apart; a crowded runtime packs tighter rather than spill past the halfway line to its
+    // nearest neighbouring runtime. Subagents ring their parent.
+    const shell = agentShellRadius();
+    const domainDir = domain => {
       const site = domainSites.get(domain) || [0, 0, 0];
-      const anchor = parent || (Math.hypot(...site) > 1e-6 ? normalize3(site) : fib[0]);
-      let best = -1, bestDot = -Infinity;
-      for (const i of free) { const d = dot3(fib[i], anchor); if (d > bestDot) { bestDot = d; best = i; } }
-      free.delete(best);
-      placed.set(n.id, fib[best]);
-      [n.ax, n.ay, n.az] = fib[best].map(value => value * shell);
+      return Math.hypot(...site) > 1e-6 ? normalize3(site) : [0, 0, 1];
+    };
+    const byDomain = new Map();
+    for (const n of agents) {
+      const list = byDomain.get(domainOf(n)) || [];
+      list.push(n);
+      byDomain.set(domainOf(n), list);
+    }
+    const nodeSpacing = 1.5 * KIND_RADIUS.agent / Math.max(1, shell);   // sunflower step, radians
+    agentWander = nodeSpacing * 0.45;
+    agentSpacingPx = nodeSpacing * 1.7 * shell;
+    for (const [domain, list] of byDomain) {
+      const dir = domainDir(domain);
+      let half = Math.PI * 0.9;   // angular room up to the halfway line with the nearest other runtime
+      for (const other of byDomain.keys()) if (other !== domain) {
+        half = Math.min(half, Math.acos(Math.max(-1, Math.min(1, dot3(dir, domainDir(other))))) / 2);
+      }
+      const ids = new Set(list.map(n => n.id));
+      const roots = list.filter(n => !(n.kind === "subagent" && ids.has(n.parent)))
+        .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+      const room = Math.max(0.05, half - agentWander - nodeSpacing);
+      const step = Math.min(nodeSpacing, room / Math.sqrt(Math.max(1, roots.length)));
+      const placed = new Map();
+      roots.forEach((n, i) => placed.set(n.id, sphericalPatchPoint(dir, i * goldenAngle, step * Math.sqrt(i))));
+      const rootIds = new Set(roots.map(n => n.id)), ring = new Map();
+      const kids = list.filter(n => !rootIds.has(n.id))
+        .sort((a, b) => depthOf(a) - depthOf(b) || String(a.id).localeCompare(String(b.id)));
+      for (const n of kids) {
+        const j = ring.get(n.parent) || 0;
+        ring.set(n.parent, j + 1);
+        placed.set(n.id, sphericalPatchPoint(placed.get(n.parent) || dir, j * goldenAngle + hash01(n.parent) * Math.PI * 2,
+                                             step * 0.6 * Math.sqrt(j + 1)));
+      }
+      for (const n of list) {
+        n.anchorDir = placed.get(n.id);
+        [n.ax, n.ay, n.az] = n.anchorDir.map(value => value * shell);
+      }
     }
     const resourceClusters = new Map();
     // Skills spread evenly over the .md shell (a Fibonacci sphere in id order).
@@ -521,7 +541,7 @@
           if (dx === 0 && dy === 0 && dz === 0) { dx = hash01(a.id + b.id) - 0.5; dy = 0.3; dz = 0.2; }
           const d2 = Math.max(dx * dx + dy * dy + dz * dz, 100);
           const d = Math.sqrt(d2);
-          const f = d < sceneRadius * 0.16 ? (sceneRadius * 0.16 - d) * 0.006 : 0;
+          const f = d < agentSpacingPx ? (agentSpacingPx - d) * 0.006 : 0;
           a.fx += (dx / d) * f; a.fy += (dy / d) * f; a.fz += (dz / d) * f;
           b.fx -= (dx / d) * f; b.fy -= (dy / d) * f; b.fz -= (dz / d) * f;
         }
@@ -567,6 +587,16 @@
       if (shellDistance > 1e-6) {
         const scale = agentShellRadius() / shellDistance;
         n.x *= scale; n.y *= scale; n.z *= scale;
+        // and only a little way from its spot, so a runtime's patch stays tight and on its side
+        if (n.anchorDir) {
+          const dir = [n.x / agentShellRadius(), n.y / agentShellRadius(), n.z / agentShellRadius()];
+          const c = Math.max(-1, Math.min(1, dot3(dir, n.anchorDir)));
+          if (Math.acos(c) > agentWander) {
+            const perp = normalize3(dir.map((value, i) => value - n.anchorDir[i] * c));
+            const r = agentShellRadius();
+            [n.x, n.y, n.z] = n.anchorDir.map((value, i) => (value * Math.cos(agentWander) + perp[i] * Math.sin(agentWander)) * r);
+          }
+        }
       } else {
         n.x = n.ax; n.y = n.ay; n.z = n.az;
       }
