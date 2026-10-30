@@ -18,8 +18,8 @@ def use(tid, name, inp):
     return {"type": "tool_use", "id": tid, "name": name, "input": inp}
 
 
-def result(tid):
-    return {"type": "tool_result", "tool_use_id": tid, "content": "ok"}
+def result(tid, content="ok"):
+    return {"type": "tool_result", "tool_use_id": tid, "content": content}
 
 
 class ParseFile(unittest.TestCase):
@@ -280,6 +280,49 @@ class ParseFile(unittest.TestCase):
             key = graph._path_key("$AGENT_DASH_TEST_VAR/x.md")
         self.assertIn(os.path.normcase("$AGENT_DASH_TEST_VAR"), key)
         self.assertNotIn("leaked-value", key)
+
+    # ---- Ship events: commits, pushes and PRs read from Bash calls and their results
+    def ships_of(self, command, output):
+        text = (line(self.iso(-10), use("t1", "Bash", {"command": command})) +
+                line(self.iso(-8), result("t1", output)))
+        return graph.parse_file(self.write(self.dir / "proj" / "ship.jsonl", text))["ships"]
+
+    def test_push_with_ref_line_is_an_ok_push_on_that_branch(self):
+        ships = self.ships_of("git push origin feature-x",
+                              "To github.com:acme/widget.git\n * [new branch]      feature-x -> feature-x\n")
+        self.assertEqual(len(ships), 1)
+        push = ships[0]
+        self.assertEqual((push["step"], push["ok"], push["branch"], push["remote"]), ("push", True, "feature-x", "origin"))
+        self.assertEqual((push["id"], push["agent"], push["url"]), ("ship:t1:push", "ship", None))
+        self.assertAlmostEqual(push["at"], graph._ts(self.iso(-8)))   # when the result came back
+
+    def test_rejected_push_is_not_ok(self):
+        ships = self.ships_of("git push origin main",
+                              "To github.com:acme/widget.git\n ! [rejected]        main -> main (fetch first)\n"
+                              "error: failed to push some refs to 'github.com:acme/widget.git'\n")
+        self.assertEqual([(s["step"], s["ok"]) for s in ships], [("push", False)])
+
+    def test_push_then_pr_yields_both_with_the_pr_url(self):
+        ships = self.ships_of("git push -u origin HEAD && gh pr create --fill",
+                              "To github.com:acme/widget.git\n * [new branch]      HEAD -> feature-y\n"
+                              "branch 'feature-y' set up to track 'origin/feature-y'.\n"
+                              "https://github.com/acme/widget/pull/42\n")
+        self.assertEqual([(s["step"], s["ok"]) for s in ships], [("push", True), ("pr", True)])
+        push, pr = ships
+        self.assertEqual(push["branch"], "feature-y")         # HEAD resolved from the -> line
+        self.assertEqual(pr["url"], "https://github.com/acme/widget/pull/42")
+        self.assertEqual(pr["branch"], "feature-y")
+        self.assertEqual(pr["id"], "ship:t1:pr")
+
+    def test_commit_with_nothing_to_commit_is_not_ok(self):
+        ships = self.ships_of("git commit -m x", "On branch main\nnothing to commit, working tree clean\n")
+        self.assertEqual([(s["step"], s["ok"]) for s in ships], [("commit", False)])
+
+    def test_pr_result_with_a_non_github_url_has_no_url(self):
+        ships = self.ships_of("gh pr create --fill", "https://github.example.com/acme/widget/pull/7\n")
+        self.assertEqual(len(ships), 1)
+        self.assertIsNone(ships[0]["url"])
+        self.assertFalse(ships[0]["ok"])
 
 
 if __name__ == "__main__":

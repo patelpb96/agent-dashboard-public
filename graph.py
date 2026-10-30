@@ -27,6 +27,7 @@ re-parsed only when its (mtime, size) changes, like metrics.py.
 import json
 import os
 import re
+import shlex
 import threading
 import time
 from datetime import datetime
@@ -364,6 +365,252 @@ def detail_of(inp):
     return ""
 
 
+# ---- Ship events: commits, pushes and pull requests found in shell calls.
+SHIP_EVENTS_TOTAL = 200     # newest ship events kept across all transcripts
+# Tools that start a shell command. BashOutput, KillShell, Monitor and write_stdin only watch or feed
+# a command that is already running, so they never start a commit or a push themselves.
+SHELL_RUN_TOOLS = {"Bash", "PowerShell", "exec", "exec_command", "shell", "powershell", "bash", "run_command"}
+SHELLS = {"bash", "sh", "zsh", "dash", "fish", "pwsh", "powershell", "cmd"}
+SHIP_TEXT_MAX = 200         # branch and remote names are shown as plain text; keep them short
+# The only text from a transcript the page may turn into a link. ASCII only, so look-alike
+# letters cannot sneak into the owner or repo name.
+PR_URL = re.compile(r"^https://github\.com/[\w.-]+/[\w.-]+/pull/\d+", re.ASCII | re.MULTILINE)
+# `[main 1a2b3c4] message`, also `[main (root-commit) 1a2b3c4]` and `[detached HEAD 1a2b3c4]`
+COMMIT_LINE = re.compile(r"^\[([^\]\n]+?)(?: \(root-commit\))? [0-9a-f]{7,40}\] ", re.MULTILINE)
+# A pushed ref: ` * [new branch]  feature-x -> feature-x`, `   1a2b..3c4d  main -> main`, ` + a...b  x -> x`.
+# Rejected refs (`!`) are left out here and caught by the `! [rejected]` check.
+PUSH_REF = re.compile(r"^\s*(?:[+*=-]\s+)?(?:(?:\[[^\]\n]+\]|[0-9a-f]{4,40}\.\.\.?[0-9a-f]{4,40})\s+)?"
+                      r"(\S+)\s+->\s+(\S+)", re.MULTILINE)
+TRACKING = re.compile(r"branch '([^'\n]+)' set up to track", re.IGNORECASE)   # older git writes "Branch"
+EXIT_CODE = re.compile(r"(?:exit code|exited with code|exit_code\"?)[:\s]+(-?\d+)", re.IGNORECASE)
+REDIRECT = re.compile(r"^(?:\d*|&)(?:>>?|<)(.*)$")
+CD_COMMANDS = {"cd", "pushd", "chdir", "set-location", "sl"}
+PUSH_VALUE_OPTIONS = {"-o", "--push-option", "--repo", "--receive-pack", "--exec"}
+PR_VALUE_OPTIONS = {"-R", "--repo", "-B", "--base", "-t", "--title", "-b", "--body", "-F", "--body-file",
+                    "-a", "--assignee", "-l", "--label", "-m", "--milestone", "-p", "--project",
+                    "-r", "--reviewer", "-T", "--template"}
+
+
+def _shell_segments(command):
+    """Split a command line on &&, ||, ;, | and newlines, keeping quoted text (commit messages) whole."""
+    out, cur, quote, i = [], [], None, 0
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            if ch == "\\" and quote == '"' and i + 1 < len(command):
+                cur.append(command[i:i + 2])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            cur.append(ch)
+        elif ch in "'\"":
+            quote = ch
+            cur.append(ch)
+        elif ch in ";\n|" or (ch == "&" and command[i - 1:i] not in (">", "<") and command[i + 1:i + 2] != ">"):
+            out.append("".join(cur))
+            cur = []
+            if command[i:i + 2] in ("&&", "||"):
+                i += 1
+        else:
+            cur.append(ch)
+        i += 1
+    out.append("".join(cur))
+    return [segment.strip() for segment in out if segment.strip()]
+
+
+def _shell_words(segment):
+    """Words of one simple command, quotes removed, backslashes kept (Windows paths), redirects dropped."""
+    lexer = shlex.shlex(segment, posix=True)
+    lexer.whitespace_split = True
+    lexer.escape = ""
+    lexer.commenters = ""
+    try:
+        words = list(lexer)
+    except ValueError:      # an unclosed quote: fall back to plain spaces
+        words = segment.split()
+    out, i = [], 0
+    while i < len(words):
+        redirect = REDIRECT.match(words[i])
+        if redirect:
+            i += 1 if redirect.group(1) else 2   # `2>&1` is one word; `> file` is two
+            continue
+        out.append(words[i])
+        i += 1
+    # leading `FOO=bar`, `env`, `command` and `time` only change how the real program runs
+    while out and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", out[0]) or out[0] in ("env", "command", "time", "&")):
+        out.pop(0)
+    return out
+
+
+def _program(word):
+    name = PurePath(str(word).replace("\\", "/")).name.casefold()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def _join_dir(cwd, path):
+    raw = os.path.expanduser(str(path or ""))
+    if not raw:
+        return cwd
+    if os.path.isabs(raw) or not cwd:
+        return raw
+    return os.path.join(cwd, raw)
+
+
+def _clip(value):
+    return str(value)[:SHIP_TEXT_MAX] if value else None
+
+
+def ship_steps(command, cwd=None):
+    """The commit, push and PR steps one shell command would run, in order, with what the command says."""
+    if not isinstance(command, str) or not re.search(r"\bgit\b|\bgh\b", command):
+        return []
+    steps = []
+    for segment in _shell_segments(command):
+        words = _shell_words(segment)
+        if not words:
+            continue
+        program = _program(words[0])
+        if program in CD_COMMANDS:
+            targets = [w for w in words[1:] if not w.startswith("-")]
+            if targets and targets[-1] != "-":
+                cwd = _join_dir(cwd, targets[-1])   # later steps run in that folder
+            continue
+        if program == "gh" and len(words) >= 3 and words[1] == "pr" and words[2] in ("create", "new"):
+            branch, skip = None, False
+            for i, word in enumerate(words[3:], 3):
+                if skip:
+                    skip = False
+                elif word in ("-H", "--head") and i + 1 < len(words):
+                    branch, skip = words[i + 1], True
+                elif word.startswith("--head="):
+                    branch = word.split("=", 1)[1]
+                elif word in PR_VALUE_OPTIONS:
+                    skip = True
+            steps.append({"step": "pr", "branch": branch, "remote": None, "cwd": cwd})
+            continue
+        if program != "git":
+            continue
+        i = 1
+        while i < len(words) and words[i].startswith("-"):   # git's own options come before the subcommand
+            if words[i] == "-C" and i + 1 < len(words):
+                cwd = _join_dir(cwd, words[i + 1])
+                i += 2
+            elif words[i] in ("-c", "--git-dir", "--work-tree", "--namespace") and i + 1 < len(words):
+                i += 2
+            else:
+                i += 1
+        if i >= len(words):
+            continue
+        sub, args = words[i], words[i + 1:]
+        if sub == "commit":
+            if "--dry-run" not in args:
+                steps.append({"step": "commit", "branch": None, "remote": None, "cwd": cwd})
+        elif sub == "push":
+            if any(a in ("-n", "--dry-run", "-d", "--delete") for a in args):
+                continue    # a rehearsal or a branch deletion ships nothing
+            positional, skip = [], False
+            for arg in args:
+                if skip:
+                    skip = False
+                elif arg in PUSH_VALUE_OPTIONS:
+                    skip = True
+                elif not arg.startswith("-"):
+                    positional.append(arg)
+            branch = None
+            for ref in positional[1:2]:
+                ref = ref.lstrip("+").split(":", 1)[-1]   # `src:dst` lands on dst
+                branch = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+            steps.append({"step": "push", "branch": branch or None,
+                          "remote": positional[0] if positional else None, "cwd": cwd})
+    return steps
+
+
+def _result_text(value):
+    """Plain text of a tool result, whatever shape the runtime stored it in."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(_result_text(item) for item in value)
+    if isinstance(value, dict):
+        return "\n".join(_result_text(value[key]) for key in ("text", "output", "content", "stdout", "stderr")
+                         if key in value)
+    return ""
+
+
+def _exit_failed(text):
+    """True when the result reports a non-zero exit code near its top."""
+    match = EXIT_CODE.search(text[:400])
+    return bool(match) and match.group(1) != "0"
+
+
+def command_of(name, inp, raw_text=""):
+    """The command line a shell tool call runs, or None for any other call."""
+    if name not in SHELL_RUN_TOOLS:
+        return None
+    inp = inp if isinstance(inp, dict) else {}
+    for key in ("command", "cmd", "command_line", "script"):
+        value = inp.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+        if isinstance(value, list) and value and all(isinstance(v, str) for v in value):
+            # Codex's ["bash", "-lc", "<script>"] carries the real line last
+            if len(value) >= 2 and _program(value[0]) in SHELLS:
+                return value[-1]
+            return shlex.join(value)
+    return raw_text if raw_text and not raw_text.lstrip().startswith("{") else None
+
+
+def ship_events(agent, call_id, steps, text, at, failed=False):
+    """Ship events for one finished shell call: each step, judged from what the command printed."""
+    text = text or ""
+    lower = text.casefold()
+    bad = "error:" in lower or "fatal:" in lower
+    pushed = list(PUSH_REF.finditer(text))
+    tracking = TRACKING.search(text)
+    commit_line = COMMIT_LINE.search(text)
+    pr_url = PR_URL.search(text)
+    events, used, pushed_branch = [], {}, None
+    for step in steps:
+        kind, branch, url = step["step"], step["branch"], None
+        if kind == "commit":
+            # The `[branch hash]` line proves the commit landed even when a later chained step failed.
+            ok = bool(commit_line) or not ("nothing to commit" in lower or bad or failed)
+            if commit_line and not branch:
+                branch = commit_line.group(1)
+        elif kind == "push":
+            ok = bool(pushed or "everything up-to-date" in lower or tracking) and \
+                not ("! [rejected]" in lower or bad or "denied" in lower)
+            if not branch or branch == "HEAD":
+                branch = (pushed[0].group(2) if pushed else tracking.group(1) if tracking else None) or branch
+            if branch and branch.startswith("refs/heads/"):
+                branch = branch[len("refs/heads/"):]
+            pushed_branch = branch or pushed_branch
+        else:
+            branch = branch or pushed_branch    # `git push -u origin HEAD && gh pr create` opens the PR for that branch
+            ok = bool(pr_url)
+            url = pr_url.group(0) if pr_url else None
+        used[kind] = used.get(kind, 0) + 1
+        name = kind if used[kind] == 1 else f"{kind}{used[kind]}"   # a second push in one line keeps its own id
+        cwd = step["cwd"]
+        events.append({"id": f"{agent}:{call_id}:{name}", "agent": agent, "at": at, "step": kind, "ok": ok,
+                       "branch": _clip(branch), "remote": _clip(step["remote"]), "url": url,
+                       "cwd": cwd or None,
+                       "folder": "doc:" + _path_key(cwd).replace("\\", "/") if cwd else None})
+    return events
+
+
+def ship_target(folder, doc_groups):
+    """The doc group the page can beam from: the cwd's own folder, else its busiest folder below it."""
+    if not folder:
+        return None
+    if folder in doc_groups:
+        return folder
+    prefix = folder.rstrip("/") + "/"
+    under = [group for group in doc_groups if group.startswith(prefix)]
+    return min(under, key=lambda g: (-doc_groups[g], len(g), g)) if under else None
+
+
 def subagent_label(path):
     """A subagent's description from its .meta.json, else its file name."""
     try:
@@ -382,6 +629,9 @@ def parse_file(path):
     open_calls = {}     # tool_use id -> call event still waiting for its result
     events = []         # newest call events, for the flow view
     busy = False        # the newest turn still waits on a tool or on the model (no end_turn after it)
+    ships = []          # commits, pushes and PRs this agent ran, judged once their result is in
+    pending_ships = {}  # tool_use id -> (steps, at) for a shell call that may ship, until its result
+    cwd = None          # every Claude transcript line records the folder the agent was working in
     try:
         with path.open(encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -398,6 +648,7 @@ def parse_file(path):
                 except ValueError:
                     continue
                 at = _ts(entry.get("timestamp")) or 0.0
+                cwd = entry.get("cwd") or cwd
                 content = (entry.get("message") or {}).get("content")
                 if not isinstance(content, list):
                     continue
@@ -412,6 +663,11 @@ def parse_file(path):
                             for call in calls:
                                 if call["at"]:
                                     call["ms"] = int((at - call["at"]) * 1000)
+                        pending = pending_ships.pop(part.get("tool_use_id"), None)
+                        if pending:
+                            text = _result_text(part.get("content"))
+                            ships.extend(ship_events(agent, part.get("tool_use_id"), pending[0], text, at or pending[1],
+                                                     bool(part.get("is_error")) or _exit_failed(text)))
                     elif part.get("type") == "tool_use":
                         name, inp = part.get("name") or "", part.get("input")
                         t = target_of(name, inp)
@@ -440,6 +696,9 @@ def parse_file(path):
                             events.append(primary)
                         if part.get("id"):
                             open_calls[part["id"]] = calls
+                            steps = ship_steps(command_of(name, inp), cwd)
+                            if steps:
+                                pending_ships[part["id"]] = (steps, at)
                     # tool_result parts come in user entries; nothing else to read
         mtime = path.stat().st_mtime
         if parent:
@@ -452,7 +711,7 @@ def parse_file(path):
     except OSError:
         return None
     return {"agent": agent, "provider": provider, "nodes": nodes, "edges": edges, "open": open_calls,
-            "events": events[-EVENTS_PER_FILE:]}
+            "events": events[-EVENTS_PER_FILE:], "ships": ships[-SHIP_EVENTS_TOTAL:]}
 
 
 def _codex_meta(path):
@@ -493,6 +752,8 @@ def parse_codex_file(path, now=None):
     cwd = meta.get("cwd") or ""
     project = Path(cwd).name if cwd else "Codex session"
     nodes, edges, open_calls, events = {}, {}, {}, []
+    ships, pending_ships = [], {}
+    ship_cwd = cwd          # turn_context moves this when the session changes folder; the node keeps its first cwd
     latest_started = 0.0
     latest_finished = 0.0
     latest_activity = 0.0
@@ -527,6 +788,29 @@ def parse_codex_file(path, now=None):
             calls.append(call)
         if call_id and calls:
             open_calls[call_id] = calls
+        workdir = inp.get("workdir") if isinstance(inp, dict) else None
+        steps = ship_steps(command_of(name, inp, raw_text),
+                           _join_dir(ship_cwd, workdir) if isinstance(workdir, str) else ship_cwd)
+        if call_id and steps:
+            pending_ships[call_id] = (steps, at)
+
+    def finish_ship(call_id, output, at):
+        pending = pending_ships.pop(call_id, None)
+        if not pending:
+            return
+        failed = False
+        if isinstance(output, str):
+            try:
+                decoded = json.loads(output)
+            except ValueError:
+                decoded = None
+            if isinstance(decoded, dict):   # older Codex wraps the output and its exit code in JSON
+                metadata = decoded.get("metadata")
+                code = metadata.get("exit_code") if isinstance(metadata, dict) else None
+                failed = isinstance(code, int) and code != 0
+                output = decoded.get("output", output)
+        text = _result_text(output)
+        ships.extend(ship_events(agent, call_id, pending[0], text, at or pending[1], failed or _exit_failed(text)))
 
     def finish_calls(at):
         for calls in open_calls.values():
@@ -557,6 +841,7 @@ def parse_codex_file(path, now=None):
 
                 if kind == "turn_context":
                     model = payload.get("model") or model
+                    ship_cwd = payload.get("cwd") or ship_cwd
                 elif kind == "event_msg":
                     event_type = payload.get("type")
                     event_at = _ts(payload.get("started_at") if event_type == "task_started" else payload.get("completed_at")) or at
@@ -578,6 +863,7 @@ def parse_codex_file(path, now=None):
                         for call in calls:
                             if call["at"] and at:
                                 call["ms"] = max(0, int((at - call["at"]) * 1000))
+                        finish_ship(payload.get("call_id") or payload.get("tool_call_id"), payload.get("output"), at)
                 elif kind in ("custom_tool_call", "function_call", "tool_use"):
                     args, raw_text = _codex_args(entry)
                     add_call(entry.get("name") or entry.get("tool_name") or "", args, raw_text,
@@ -587,6 +873,7 @@ def parse_codex_file(path, now=None):
                     for call in calls:
                         if call["at"] and at:
                             call["ms"] = max(0, int((at - call["at"]) * 1000))
+                    finish_ship(entry.get("call_id") or entry.get("tool_call_id"), entry.get("output"), at)
         mtime = path.stat().st_mtime
         latest_activity = max(latest_activity, mtime)
     except OSError:
@@ -600,7 +887,7 @@ def parse_codex_file(path, now=None):
                     "space": "codex", "environment": _environment(meta), "state": "working" if active else "done", "model": model,
                     "cwd": cwd, "mtime": mtime, "open": active}
     return {"agent": agent, "provider": "codex", "nodes": nodes, "edges": edges,
-            "open": open_calls, "events": events[-EVENTS_PER_FILE:]}
+            "open": open_calls, "events": events[-EVENTS_PER_FILE:], "ships": ships[-SHIP_EVENTS_TOTAL:]}
 
 
 def _pi_meta(path):
@@ -631,6 +918,7 @@ def parse_pi_file(path, now=None):
         parent_id = None
     environment = _environment(meta)
     nodes, edges, open_calls, events = {}, {}, {}, []
+    ships, pending_ships = [], {}
     spawn_calls = {}
     latest_activity = 0.0
     latest_role = None
@@ -663,6 +951,9 @@ def parse_pi_file(path, now=None):
             calls.append(call)
         if call_id and calls:
             open_calls[call_id] = calls
+        steps = ship_steps(command_of(name, inp), cwd)
+        if call_id and steps:
+            pending_ships[call_id] = (steps, at)
         mode, jobs = _pi_subagent_jobs(name, inp)
         if jobs:
             child_ids = []
@@ -740,6 +1031,11 @@ def parse_pi_file(path, now=None):
                             add_call(block.get("name") or "", args, at, block.get("id") or block.get("toolCallId"))
                 elif role == "toolResult":
                     finish_call(message.get("toolCallId"), at, message.get("durationMs"))
+                    pending = pending_ships.pop(message.get("toolCallId"), None)
+                    if pending:
+                        text = _result_text(message.get("content"))
+                        ships.extend(ship_events(agent, message.get("toolCallId"), pending[0], text, at or pending[1],
+                                                 bool(message.get("isError")) or _exit_failed(text)))
 
         mtime = path.stat().st_mtime
         latest_activity = max(latest_activity, mtime)
@@ -768,7 +1064,7 @@ def parse_pi_file(path, now=None):
                     "environment": environment, "state": "working" if working else "idle" if active else "done",
                     "model": model, "cwd": cwd, "mtime": mtime, "open": active}
     return {"agent": agent, "provider": "pi", "nodes": nodes, "edges": edges,
-            "open": open_calls, "events": events[-EVENTS_PER_FILE:]}
+            "open": open_calls, "events": events[-EVENTS_PER_FILE:], "ships": ships[-SHIP_EVENTS_TOTAL:]}
 
 
 def load_rosters(now, directory=None):
@@ -858,8 +1154,9 @@ class GraphStore:
     def __init__(self):
         self._files = {}   # path -> ((mtime, size), parsed)
         self._lock = threading.Lock()
-        self._snapshot = {"nodes": {}, "edges": [], "generatedAt": None}
+        self._snapshot = {"nodes": {}, "edges": [], "generatedAt": None, "ships": []}
         self._events = []
+        self._ships = []    # newest first, at most SHIP_EVENTS_TOTAL
         threading.Thread(target=self._loop, daemon=True).start()
 
     def _loop(self):
@@ -931,9 +1228,10 @@ class GraphStore:
         self._publish(now, load_rosters(now))
 
     def _publish(self, now, rosters=()):
-        nodes, edges, events = {}, {}, []
+        nodes, edges, events, ships = {}, {}, [], []
         for _, parsed in self._files.values():
             events.extend(parsed.get("events", []))
+            ships.extend(parsed.get("ships", []))
             for nid, info in parsed["nodes"].items():
                 existing = nodes.get(nid)
                 if existing is None:
@@ -991,6 +1289,20 @@ class GraphStore:
             nodes[nid]["cloud"] = bool(nodes[nid]["cloudDomains"])
         for node in nodes.values():
             node.pop("_parentStub", None)
+        # A roster can fold an agent's extra sessions into one node; their ships follow it there.
+        aliases = {alias: a["sessionId"] for roster in rosters for a in roster.get("agents") or []
+                   if isinstance(a, dict) and a.get("sessionId") for alias in a.get("sessions") or []}
+        doc_groups = {}
+        for node in nodes.values():
+            if node.get("kind") == "doc" and node.get("group"):
+                doc_groups[node["group"]] = doc_groups.get(node["group"], 0) + 1
+        # Newest first. Steps of one command share a time, so flip first and let the stable sort keep
+        # them latest-step-first (a PR above the push it followed).
+        ships.reverse()
+        ships.sort(key=lambda s: s["at"], reverse=True)
+        # Copies, so the per-file cache keeps its events untouched between publishes.
+        ships = [{**s, "agent": aliases.get(s["agent"], s["agent"]),
+                  "target": ship_target(s.get("folder"), doc_groups)} for s in ships[:SHIP_EVENTS_TOTAL]]
         out = [{
             "src": src, "dst": dst, "kind": kind,
             "count": e["count"], "lastAt": e["lastAt"],
@@ -1001,10 +1313,12 @@ class GraphStore:
             "nodes": nodes,
             "edges": out,
             "generatedAt": now,
+            "ships": ships,
         }
         with self._lock:
             self._snapshot = snapshot
             self._events = events[-FLOW_EVENTS_TOTAL:]
+            self._ships = ships
 
     def snapshot(self):
         with self._lock:

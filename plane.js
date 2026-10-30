@@ -17,6 +17,13 @@
   const EDGE_COLOR = { call: "--working", spawn: "--blocked", message: "--done", reports: "--idle" };
   const MAX_LABELS = 40;
   const RECENT_PI_SUBAGENT_SECONDS = 120; // Give fast/completed child runs time to be noticed on the plane.
+  const SHIPS_KEY = "plane-ships-open";
+  const SHIPS_SHOWN = 50;
+  const SHIP_FRESH_S = 120;      // only a ship this recent beams; an old session coming back into view stays quiet
+  const BEAM_MS = 1600;          // a beam shoots out and fades over this long
+  const BEAM_STILL_MS = 500;     // with reduced motion it just stands at full length this long
+  // The only ship text that may become a link: a GitHub pull request URL (the server checks the same).
+  const PR_URL = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)$/;
   const isAgent = n => n.kind === "agent" || n.kind === "subagent";
   const STATE_COLOR = { blocked: "--blocked", working: "--working", idle: "--idle", done: "--done", other: "--other" };
   const DOMAIN_COLORS = { claude: "#e9a960", claude_code: "#e9a960", "claude-code": "#e9a960",
@@ -65,6 +72,13 @@
   try { closedOpen = localStorage.getItem("plane-closed-open") === "1"; } catch (e) { /* storage blocked */ }
   let lanesOpen = true, waitsOpen = true;
   let onOpen = () => {}, onWatch = () => {};
+  let beams = [];             // ship beams in flight: {id, color, born, reach, width}
+  let shipsSeen = new Set();  // ship ids already taken in, so only new ones beam
+  let shipsPrimed = false;    // the first poll takes in history without beaming, so a reload replays nothing
+  let shipsPanel = null, shipsKey = "", shipWhen = [];
+  let agentNames = new Map(); // every agent the server knows, closed ones too, for the Ships list
+  let shipsOpen = false;
+  try { shipsOpen = localStorage.getItem(SHIPS_KEY) === "1"; } catch (e) { /* storage blocked */ }
 
   const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
@@ -521,6 +535,86 @@
     }
     for (const key of [...edges.keys()]) if (!keep.has(key)) edges.delete(key);
     simAlpha = Math.max(simAlpha, 0.6);  // new data reheats the layout a little
+    agentNames = new Map(raw.nodes.filter(isAgent).map(n => [n.id, n.name || n.label || n.id]));
+    // A server that has not read its transcripts yet sends no generatedAt; wait for it before priming.
+    if (raw.generatedAt) takeShips(Array.isArray(raw.ships) ? raw.ships : [], raw.generatedAt);
+  }
+
+  // ---- Ship events: a successful push or PR sends a beam of light out of the agent and its repo folder.
+  function takeShips(list, serverNow) {
+    for (const ship of list) {
+      if (!ship || shipsSeen.has(ship.id)) continue;
+      shipsSeen.add(ship.id);
+      if (shipsPrimed && ship.ok && (ship.step === "push" || ship.step === "pr") &&
+          serverNow - (ship.at || 0) <= SHIP_FRESH_S) fireShip(ship);
+    }
+    shipsPrimed = true;
+    // The server keeps the newest 200, so ids that have dropped off its list never come back.
+    if (shipsSeen.size > 2000) shipsSeen = new Set(list.map(ship => ship.id));
+    renderShips(list);
+  }
+
+  // The node a folder's beam leaves from: the first member of its group, the one a fold keeps on show.
+  function folderNode(group) {
+    const key = "files:" + String(group).toLowerCase();
+    let first = null;
+    for (const n of nodes.values()) {
+      if (n.gone || n.surfaceCluster !== key) continue;
+      if (!first || String(n.id).localeCompare(String(first.id)) < 0) first = n;
+    }
+    return first;
+  }
+
+  function fireShip(ship) {
+    const born = performance.now();
+    const reach = ship.step === "pr" ? 1.15 : 1, width = ship.step === "pr" ? 1.35 : 1;   // a PR is the bigger moment
+    const agent = nodes.get(ship.agent);
+    if (agent && !agent.gone && isAgent(agent)) {
+      beams.push({ id: agent.id, color: domainColor(domainOf(agent)), born, reach, width });
+    }
+    const folder = ship.target && folderNode(ship.target);
+    if (folder) beams.push({ id: folder.id, color: colors.accent, born, reach, width });
+  }
+
+  // Beams go straight out from the surface their node sits on: an agent's runtime sphere, or the big
+  // spheres around the origin for files. They are projected like everything else, so they turn with the scene.
+  function drawBeams(now) {
+    if (!beams.length) return;   // nothing in flight: no work and no allocations this frame
+    const life = REDUCED ? BEAM_STILL_MS : BEAM_MS;
+    ctx.save();
+    ctx.globalCompositeOperation = colors.crisp ? "source-over" : "lighter";
+    ctx.lineCap = "round";
+    for (let i = beams.length - 1; i >= 0; i--) {
+      const beam = beams[i], n = nodes.get(beam.id), t = (now - beam.born) / life;
+      if (t >= 1 || !n || (n.gone && now - n.gone >= 900)) { beams.splice(i, 1); continue; }
+      const ball = isAgent(n) ? domainBalls.get(n.ball) : null;
+      let ux = n.dx - (ball ? ball.center[0] : 0), uy = n.dy - (ball ? ball.center[1] : 0), uz = n.dz - (ball ? ball.center[2] : 0);
+      const d = Math.hypot(ux, uy, uz);
+      if (d < 1e-6) { ux = 0; uy = -1; uz = 0; } else { ux /= d; uy /= d; uz /= d; }
+      // Reduced motion: no growth and no fade, the beam simply stands for a moment.
+      const grow = REDUCED ? 1 : 1 - Math.pow(1 - Math.min(1, t / 0.3), 3);   // shoots out fast, then holds
+      const fade = REDUCED ? 1 : 1 - t * t;
+      const length = sceneRadius * 0.7 * beam.reach * grow;
+      if (length < 1) continue;
+      const a = cameraPoint([n.dx, n.dy, n.dz]);
+      const b = cameraPoint([n.dx + ux * length, n.dy + uy * length, n.dz + uz * length]);
+      const near = Math.max(0, Math.min(1, (a.depth / sceneRadius + 1) / 2));   // dimmer toward the back, like labels
+      const leaving = n.gone ? Math.max(0, 1 - (now - n.gone) / 900) : 1;
+      const alpha = fade * leaving * (0.45 + 0.55 * near);
+      const light = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
+      light.addColorStop(0, withAlpha(beam.color, alpha));
+      light.addColorStop(0.75, withAlpha(beam.color, alpha * 0.7));
+      light.addColorStop(1, withAlpha(beam.color, 0));
+      ctx.strokeStyle = light;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+      ctx.globalAlpha = 0.3;                                    // the wide soft halo
+      ctx.lineWidth = 10 * beam.width * a.scale;
+      ctx.stroke();
+      ctx.globalAlpha = 1;                                      // the narrow bright core
+      ctx.lineWidth = 2 * beam.width * a.scale;
+      ctx.stroke();
+    }
+    ctx.restore();
   }
 
   // Agents slide over the inner agent shell. Resources form surface clusters by folder or
@@ -954,6 +1048,7 @@
       }
     }
     ctx.globalCompositeOperation = "source-over";
+    drawBeams(now);
 
     const agents = [...nodes.values()].filter(n => isAgent(n) && !n.gone);
     const crowded = agents.length > MAX_LABELS;
@@ -1556,6 +1651,57 @@
     waitsPanel.body.replaceChildren(...(rows.length ? rows : [el("div", "flow-empty", "no agent history yet")]));
   }
 
+  // ---- Ships window: the newest commits, pushes and PRs. Text only; a link only for a checked PR URL.
+  function renderShips(list) {
+    if (!shipsPanel) return;
+    const shown = list.slice(0, SHIPS_SHOWN);
+    shipsPanel.win.hidden = !shown.length;
+    shipsPanel.title.textContent = `Ships · ${shown.length}`;
+    // Rebuild only when the rows change, so a focused row keeps focus; otherwise just age the times.
+    const key = shown.map(s => `${s.id}|${s.ok}|${agentNames.get(s.agent) || ""}`).join("\n");
+    if (key === shipsKey) {
+      for (const w of shipWhen) w.cell.textContent = ago(w.at);
+      return;
+    }
+    shipsKey = key;
+    shipWhen = [];
+    const rows = shown.map(ship => {
+      const row = el("li", "ship-row" + (ship.ok ? "" : " failed"));
+      const when = el("span", "ship-when", ago(ship.at || 0));
+      shipWhen.push({ cell: when, at: ship.at || 0 });
+      const full = String(agentNames.get(ship.agent) || ship.agent || "");
+      const who = el("span", "ship-agent", full.slice(0, 4));
+      who.title = full;
+      const branch = el("span", "ship-branch", ship.branch || "");
+      if (ship.branch) branch.title = String(ship.branch);
+      row.append(when, who, el("span", "ship-step", ship.step === "pr" ? "PR" : String(ship.step || "")), branch);
+      const pr = ship.step === "pr" && typeof ship.url === "string" ? ship.url.match(PR_URL) : null;
+      if (!ship.ok) row.append(el("span", "ship-failed", "failed"));
+      else if (pr) {
+        const link = el("a", "ship-link", `${pr[1]}/${pr[2]}#${pr[3]}`);
+        link.href = pr[0];
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.addEventListener("click", e => e.stopPropagation());   // following the link is not a replay
+        row.append(link);
+      }
+      if (ship.ok && (ship.step === "push" || ship.step === "pr")) {   // only these ever beam
+        row.classList.add("replay");
+        row.tabIndex = 0;
+        row.setAttribute("role", "button");
+        row.setAttribute("aria-label", `Replay the ${ship.step} beam of ${full}${ship.branch ? " on " + ship.branch : ""}`);
+        row.addEventListener("click", () => fireShip(ship));
+        row.addEventListener("keydown", e => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fireShip(ship); }
+        });
+      }
+      return row;
+    });
+    const listEl = el("ul", "ship-list");
+    listEl.append(...rows);
+    shipsPanel.body.replaceChildren(listEl);
+  }
+
   document.addEventListener("keydown", e => {
     if (e.key === "Escape" && (selectedKey || selectedAgent || selectedItems.size)) closeFlow();
   });
@@ -1586,6 +1732,13 @@
       closedPanel.win.id = "closed-panel";
       closedPanel.win.hidden = true;
       wrap.append(closedPanel.win);
+      shipsPanel = foldWindow("Ships", "ships", shipsOpen, open => {
+        shipsOpen = open;
+        try { localStorage.setItem(SHIPS_KEY, open ? "1" : "0"); } catch (e) { /* storage blocked */ }
+      });
+      shipsPanel.win.id = "ships-panel";
+      shipsPanel.win.hidden = true;   // shown once there is a ship to list
+      wrap.append(shipsPanel.win);
       readColors();
       resize();
       window.addEventListener("resize", resize);
