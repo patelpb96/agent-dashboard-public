@@ -6,6 +6,8 @@ agent is a node, linked to the files, web tools, MCP servers and other agents it
 graph it shows live usage and cost, which agents are waiting on you, and a terminal view of any
 background job.
 
+![The dashboard showing a mock newsroom: agents on their sphere, with the files and tools they touch around them](docs/dashboard.jpg)
+
 - **Read-only and local.** The server binds to `127.0.0.1`, only reads files, and sends nothing
   anywhere. The page loads xterm.js, marked, DOMPurify and Google Fonts from public CDNs.
 - **No dependencies.** The server is plain Python standard library.
@@ -32,8 +34,8 @@ background job.
 ## Install
 
 ```bash
-git clone https://github.com/<your-org>/agent-dashboard.git
-cd agent-dashboard
+git clone https://github.com/patelpb96/agent-dashboard-public.git
+cd agent-dashboard-public
 ```
 
 Nothing else to install. To check the copy works:
@@ -52,6 +54,22 @@ That opens `http://127.0.0.1:8765/`. There are also launchers that do the same t
 Windows and `./agents.sh` on macOS/Linux. Put the folder on your `PATH` to run `agents` from anywhere.
 
 If you restart the server, hard-refresh the tab (Ctrl+Shift+R) so the browser loads the new `plane.js`.
+
+## Security model
+
+The server binds to `127.0.0.1` only and has no authentication. Anyone who can run code as your user,
+or reach that port on your machine, can read everything it shows: session names, file paths, usage and
+cost, and agent terminal output (through `claude logs`).
+
+It refuses any request whose `Host` header is not a loopback name, so a web page cannot reach it by
+pointing its own DNS name at `127.0.0.1` (DNS rebinding). It also refuses a POST whose `Origin` is
+another site.
+
+The only action it can take on your machine is **Open folder** on a selected file. That opens a local
+folder in your file manager. Network paths (`\\server\share`) are refused.
+
+The scripts and stylesheet it loads from jsDelivr are pinned by version and by subresource integrity,
+so the browser will not use a file that has changed.
 
 ## Configuration
 
