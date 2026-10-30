@@ -78,6 +78,7 @@
   :root[data-theme="8bit"] #flow-panel,
   :root[data-theme="8bit"] #waits-panel,
   :root[data-theme="8bit"] #closed-panel,
+  :root[data-theme="8bit"] #ships-panel,
   :root[data-theme="8bit"] .mini {
     border: 2px solid var(--line); border-radius: 0; backdrop-filter: none; box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.7);
   }
@@ -123,7 +124,7 @@
     --page-bg: #191919;
     --agent-fill: #000000; --agent-ring: 0.5;
   }
-  :root:is([data-theme="paper"], [data-theme="ink"]) :is(.tile, #plane-wrap, .drawer, #flow-panel, #waits-panel, #closed-panel, .mini) {
+  :root:is([data-theme="paper"], [data-theme="ink"]) :is(.tile, #plane-wrap, .drawer, #flow-panel, #waits-panel, #closed-panel, #ships-panel, .mini) {
     border: 1px solid var(--rule); border-radius: 0; backdrop-filter: none; box-shadow: var(--hard-shadow);
   }
   :root:is([data-theme="paper"], [data-theme="ink"]) header { border-bottom: 1px solid var(--rule); backdrop-filter: none; }
@@ -327,12 +328,35 @@
   .closed-brand-logo { width: 16px; height: 16px; flex: none; image-rendering: pixelated; }
   .closed-dot { width: 7px; height: 7px; flex: none; }
   .closed-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+  /* Ships window: newest commits, pushes and PRs, bottom-right, folded by default; click a row to replay its beam */
+  #ships-panel { position: absolute; right: 10px; bottom: 34px; width: min(360px, calc(100% - 20px)); max-height: 40%;
+                 overflow-y: auto; background: var(--drawer); border: 1px solid var(--line); padding: 6px 12px; font-size: 12px; }
+  #ships-panel[hidden] { display: none; }
+  #ships-panel .fold-bar { font-size: 12px; }
+  #flow-panel:not([hidden]) ~ #ships-panel { right: calc(min(380px, 100%) + 10px); }   /* step aside for the flow window */
+  .ship-list { list-style: none; margin: 0; padding: 0 0 6px; }
+  .ship-row { display: grid; grid-template-columns: 50px 40px 46px minmax(0, 1fr) auto; gap: 6px; align-items: baseline;
+              padding: 4px 2px; border-top: 1px solid var(--line); }
+  .ship-row:first-child { border-top: none; }
+  .ship-row.replay { cursor: pointer; }
+  .ship-row.replay:hover { background: var(--chip); }
+  .ship-row.replay:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .ship-when { color: var(--muted); }
+  .ship-agent { font-weight: 600; }
+  .ship-step { color: var(--muted); text-transform: uppercase; letter-spacing: .04em; font-size: 11px; }
+  .ship-branch { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ship-link { color: var(--accent); white-space: nowrap; }
+  .ship-row.failed, .ship-row.failed .ship-agent, .ship-failed { color: var(--muted); }
   /* Narrow screens: the flow window becomes a bottom sheet and the hint moves away */
   @media (max-width: 720px) {
     #plane-wrap { height: calc(100vh - 170px); min-height: 360px; }
     #flow-panel { left: 0; top: auto; height: 62%; width: auto; border-left: none; border-top: 1px solid var(--line); }
     #waits-panel { max-height: 30%; width: calc(100% - 20px); }
     #closed-panel { bottom: 10px; max-height: 25%; }
+    /* Closed and Ships share the bottom edge, half each; the flow sheet covers Ships while it is open */
+    #closed-panel, #ships-panel { width: calc(50% - 15px); }
+    #ships-panel { bottom: 10px; max-height: 25%; }
+    #flow-panel:not([hidden]) ~ #ships-panel { display: none; }
     #plane-hint { display: none; }
   }
   body.watch header, body.watch .stats, body.watch #plane-wrap, body.watch .banner { display: none; }

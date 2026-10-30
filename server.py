@@ -283,7 +283,9 @@ def graph_payload():
             node.update(names[node["id"]])
             node["label"] = node["name"]
     mark_open(nodes, open_session_ids(), time.time())
-    return {"generatedAt": snap["generatedAt"], "nodes": nodes, "edges": snap["edges"]}
+    # ships: newest commits, pushes and PRs; the page beams on new ones and lists them
+    return {"generatedAt": snap["generatedAt"], "nodes": nodes, "edges": snap["edges"],
+            "ships": snap.get("ships", [])}
 
 
 def waits_payload():

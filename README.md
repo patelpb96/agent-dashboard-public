@@ -16,6 +16,9 @@ background job.
   `.md` file sits one stratum out, on a larger concentric sphere, in the same spot of its folder's
   patch. Skills live there too, as squares: a skill's `SKILL.md`, anything under `skills/<name>/`, a
   `MINISKILL.md`, and a `Skill` tool call are all one node.
+- **Ship events.** When an agent's `git push` or `gh pr create` succeeds, a beam of light shoots out of
+  the agent and out of its repo's folder on the graph. A Ships window lists the newest commits, pushes
+  and pull requests (failed ones greyed out) with a link to each GitHub PR; click a row to replay its beam.
 
 ## Requirements
 
