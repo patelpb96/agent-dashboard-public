@@ -14,7 +14,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 import waits
 from graph import GraphStore
@@ -31,6 +31,8 @@ LOG_BYTES = 300 * 1024
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 METRICS = Metrics()
 GRAPH = GraphStore()
+LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+JSON = "application/json; charset=utf-8"
 STATIC = {"/space.jpg": ("space.jpg", "image/jpeg"), "/plane.js": ("plane.js", "application/javascript; charset=utf-8")}
 
 
@@ -348,8 +350,36 @@ def collect():
             "authStatus": auth_status(), "metrics": METRICS.snapshot()}
 
 
+def host_name(value):
+    """The hostname in a Host header, without the port: "[::1]:8765" -> "::1"."""
+    value = (value or "").strip().lower()
+    if value.startswith("["):
+        end = value.find("]")
+        return value[1:end] if end > 0 else ""
+    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+
+
+def local_origin(origin):
+    """Is this Origin header a page served from this machine (any port)?"""
+    try:
+        parts = urlsplit(origin)
+        return parts.scheme == "http" and parts.hostname in LOOPBACK
+    except ValueError:
+        return False
+
+
 class Handler(BaseHTTPRequestHandler):
+    def _local_host(self):
+        """Refuse (421) a Host that is not loopback: a rebound DNS name still sends its own Host."""
+        # The port is ignored on purpose; any loopback port is this machine.
+        if host_name(self.headers.get("Host")) in LOOPBACK:
+            return True
+        self._send(421, JSON, b'{"error":"local requests only"}')
+        return False
+
     def do_GET(self):
+        if not self._local_host():
+            return
         route, _, query = self.path.partition("?")
         params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
         if route == "/api/jobs":
@@ -385,6 +415,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "text/plain", b"not found")
 
     def do_POST(self):
+        if not self._local_host():
+            return
+        # A text/plain POST needs no CORS preflight, so any site could send one; browsers add Origin.
+        # No Origin means curl or a script, which could do anything anyway.
+        origin = self.headers.get("Origin")
+        if origin is not None and not local_origin(origin):
+            self._send(403, JSON, b'{"error":"cross-site request refused"}')
+            return
         route = self.path.partition("?")[0]
         if route != "/api/open-folder":
             self._send(404, "application/json; charset=utf-8", b'{"error":"not found"}')
@@ -403,7 +441,13 @@ class Handler(BaseHTTPRequestHandler):
         if node_id == "area:shared" and SHARED_DIR and node and node.get("kind") == "area":
             folder = Path(SHARED_DIR)
         elif node and node.get("kind") == "doc" and node_id.startswith("doc:"):
-            target = Path(node_id[4:])
+            raw = node_id[4:]
+            target = Path(raw)
+            # Node ids come from transcripts. Opening //host/share would connect to that host
+            # (and offer it your Windows login), so only local folders, before anything touches it.
+            if raw.startswith(("\\\\", "//")) or not target.anchor:
+                self._send(400, JSON, b'{"error":"only local folders can be opened"}')
+                return
             if not target.is_absolute():
                 self._send(400, "application/json; charset=utf-8", b'{"error":"file path is unavailable"}')
                 return
@@ -433,6 +477,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 

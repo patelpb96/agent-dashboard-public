@@ -108,19 +108,27 @@ def doc_id(path):
     return "doc:" + _path_key(path).replace("\\", "/")
 
 
+def _resolved(candidate):
+    """resolve() a path, but not a UNC one (//host/share): resolving it would connect to that host."""
+    text = str(candidate)
+    if text.startswith(("\\\\", "//")):
+        return os.path.normpath(text)
+    try:
+        return str(candidate.resolve(strict=False))
+    except OSError:
+        return text
+
+
 def _path_key(path, cwd=None):
     """Canonical path key so both providers land on one node for the same local file."""
-    raw = os.path.expandvars(os.path.expanduser(str(path or "").strip()))
+    # No expandvars: paths come from transcripts, and $VAR / %VAR% would put env values in labels.
+    raw = os.path.expanduser(str(path or "").strip())
     if not raw:
         return "document"
     candidate = Path(raw)
     if not candidate.is_absolute() and cwd:
         candidate = Path(cwd) / candidate
-    try:
-        normalized = str(candidate.resolve(strict=False))
-    except OSError:
-        normalized = str(candidate)
-    return os.path.normcase(normalized)
+    return os.path.normcase(_resolved(candidate))
 
 
 def _shared_target(path=None, cwd=None, hint=""):
@@ -132,14 +140,11 @@ def _shared_target(path=None, cwd=None, hint=""):
     root_key = os.path.normcase(str(root)).rstrip("\\/")
     candidate = None
     if path:
-        raw = os.path.expandvars(os.path.expanduser(str(path).strip()))
+        raw = os.path.expanduser(str(path).strip())
         candidate = Path(raw)
         if not candidate.is_absolute() and cwd:
             candidate = Path(cwd) / candidate
-        try:
-            candidate_key = os.path.normcase(str(candidate.resolve(strict=False)))
-        except OSError:
-            candidate_key = os.path.normcase(str(candidate))
+        candidate_key = os.path.normcase(_resolved(candidate))
         if candidate_key == root_key or candidate_key.startswith(root_key + os.sep):
             return {
                 "id": "area:shared", "kind": "area", "label": name,

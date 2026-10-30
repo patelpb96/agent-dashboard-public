@@ -1,5 +1,6 @@
 """Run with: python -m unittest test_graph -v"""
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -266,6 +267,19 @@ class ParseFile(unittest.TestCase):
         self.assertEqual(graph.document_target(home / "repo" / "MINISKILL.md")["kind"], "skill")
         self.assertEqual(graph.document_target(home / "repo" / "src" / "main.py")["kind"], "doc")
         self.assertEqual(graph.target_of("Skill", {})["id"], "tool:Skill")
+
+    def test_network_paths_are_never_resolved(self):
+        # resolve() on \\host\share connects to that host, during every scan
+        with mock.patch("pathlib.Path.resolve", side_effect=AssertionError("resolve was called")):
+            key = graph._path_key(r"\\evil\share\x.md")
+        self.assertTrue(key.startswith(os.path.normcase(r"\\evil\share")))
+
+    def test_path_keys_keep_env_vars_literal(self):
+        # a transcript path must not pull environment values into node labels
+        with mock.patch.dict(os.environ, {"AGENT_DASH_TEST_VAR": "leaked-value"}):
+            key = graph._path_key("$AGENT_DASH_TEST_VAR/x.md")
+        self.assertIn(os.path.normcase("$AGENT_DASH_TEST_VAR"), key)
+        self.assertNotIn("leaked-value", key)
 
 
 if __name__ == "__main__":
