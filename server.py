@@ -2,12 +2,14 @@
 
 Reads ~/.claude/jobs/*/state.json (+ timeline.jsonl tail) and ~/.claude/sessions/*.json.
 Stdlib only. Binds to 127.0.0.1. Run:  python server.py  (then open http://127.0.0.1:8765)
+`python server.py --status` says whether it is running and, if not, how it last stopped (runstate.py).
 """
 import json
 import os
 import sys
 import re
 import shutil
+import socket
 import time
 import subprocess
 import webbrowser
@@ -16,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+import runstate
 import waits
 from graph import GraphStore
 from metrics import Metrics
@@ -487,15 +490,44 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def port_answers(port, timeout=0.5):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def main():
     url = f"http://127.0.0.1:{PORT}/"
+    if "--status" in sys.argv:
+        code, text = runstate.status(PORT, pid_alive)
+        print(text)
+        sys.exit(code)
+    # Python's HTTPServer sets SO_REUSEADDR, which on Windows lets a second copy bind the same port
+    # without an error. Refuse instead, so there is one server per port and one honest record.
+    code, text = runstate.status(PORT, pid_alive)
+    if code == 0 and port_answers(PORT):
+        print(f"Already running: {text}  Open {url}")
+        if "--open" in sys.argv:
+            webbrowser.open(url)
+        sys.exit(1)
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    run = runstate.RunState(PORT)
+    run.start()
+    run.install()
     print(f"Agent dashboard at {url}  (Ctrl+C to stop)")
     if "--open" in sys.argv:
         webbrowser.open(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
+        run.stop("Ctrl+C")
+    except BaseException as exc:   # SIGTERM/SIGHUP arrive here already recorded; anything else is a crash
+        run.stop(f"crashed: {type(exc).__name__}: {exc}")
+        raise
+    finally:
+        run.stop("exited")
         server.server_close()
 
 

@@ -58,6 +58,18 @@ Windows and `./agents.sh` on macOS/Linux. Put the folder on your `PATH` to run `
 
 If you restart the server, hard-refresh the tab (Ctrl+Shift+R) so the browser loads the new `plane.js`.
 
+To find out whether it is running, and if not how it stopped:
+
+```bash
+python server.py --status
+```
+
+The server records each start and each stop in `~/.agent-dashboard/server-<port>.json`. When it is
+stopped on purpose (window closed, Ctrl+C, signing out, shutdown, SIGTERM), the reason is written
+before it exits. A forced kill or a crash cannot be caught, so `--status` reports that as "ended
+without a clean stop". The exit code is 0 running, 1 stopped cleanly, 2 ended uncleanly, 3 no record.
+Starting a second copy on a port that is already serving prints the running one and exits.
+
 ## Security model
 
 The server binds to `127.0.0.1` only and has no authentication. Anyone who can run code as your user,
@@ -87,6 +99,7 @@ Everything is set with environment variables. All of them are optional.
 | `AGENT_DASH_ROSTER_DIR` | `<CLAUDE_CONFIG_DIR>/agent-roster` | Roster files (below) |
 | `AGENT_DASH_SHARED_DIR` | unset (off) | A folder your agents use to pass work to each other. When set, every touch inside it is drawn as one shared node instead of many file nodes |
 | `AGENT_DASH_SIM_ROOT` | `~/newsroom-sim` | Workspaces for `newsroom.py` |
+| `AGENT_DASH_STATE_DIR` | `~/.agent-dashboard` | Where the server records that it is running and how it last stopped |
 
 All of them are read in [`paths.py`](paths.py).
 
@@ -143,6 +156,7 @@ Members then install it with the `git clone` command above, and update with `git
 | `graph.py` | Builds the agent graph from the transcripts |
 | `metrics.py` | Token, cost and model usage |
 | `waits.py` | How long agents have been waiting on you |
+| `runstate.py` | Records that the server is running, and why it last stopped (`--status`) |
 | `paths.py` | Every folder the dashboard reads, plus the environment overrides |
 | `index.html`, `plane.js` | The page and the 3D view |
 | `newsroom.py` | Demo workload |

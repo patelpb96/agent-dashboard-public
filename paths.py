@@ -7,6 +7,8 @@
   AGENT_DASH_SHARED_DIR      optional folder several agents use to pass work to each other; when set, every
                              touch inside it is drawn as one shared "area" node (default: unset, feature off)
   AGENT_DASH_SIM_ROOT        workspaces for newsroom.py (default ~/newsroom-sim)
+  AGENT_DASH_STATE_DIR       where the server records that it is running and how it last stopped
+                             (default ~/.agent-dashboard)
 """
 import os
 from pathlib import Path
@@ -25,3 +27,4 @@ CODEX_SESSIONS_DIR = _dir("CODEX_HOME", HOME / ".codex") / "sessions"
 PI_SESSIONS_DIR = _dir("AGENT_DASH_PI_SESSIONS", HOME / ".pi" / "agent" / "sessions")
 SHARED_DIR = _dir("AGENT_DASH_SHARED_DIR", None)
 SIM_ROOT = _dir("AGENT_DASH_SIM_ROOT", HOME / "newsroom-sim")
+STATE_DIR = _dir("AGENT_DASH_STATE_DIR", HOME / ".agent-dashboard")
