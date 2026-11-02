@@ -500,7 +500,8 @@ function render(data) {
 }
 
 function updateRuntimeStatus(agents) {
-  const labels = { claude: "Claude Code", codex: "Codex/GPT", pi: "Pi", openai: "OpenAI/GPT", gpt: "GPT" };
+  const labels = { claude: "Claude Code", codex: "Codex/GPT", pi: "Pi", openai: "OpenAI/GPT", gpt: "GPT",
+    antigravity: "Antigravity/Gemini" };
   const counts = new Map();
   for (const agent of agents) {
     const domain = String(agent.domain || agent.provider || "other").toLowerCase();

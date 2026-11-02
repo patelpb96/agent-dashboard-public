@@ -1,7 +1,7 @@
 # Agent Dashboard
 
 A local web dashboard for the coding agents running on your machine. It reads the session transcripts
-that Claude Code, Codex and Pi already write to disk, and draws them as a rotatable 3D graph: each
+that Claude Code, Codex, Pi and Google Antigravity already write to disk, and draws them as a rotatable 3D graph: each
 agent is a node, linked to the files, web tools, MCP servers and other agents it touches. Around the
 graph it shows live usage and cost, which agents are waiting on you, and a terminal view of any
 background job.
@@ -32,6 +32,7 @@ background job.
   | Claude Code | `~/.claude/projects`, `~/.claude/jobs`, `~/.claude/sessions` |
   | Codex CLI | `~/.codex/sessions` |
   | Pi | `~/.pi/agent/sessions` |
+  | Google Antigravity CLI (Gemini) | `~/.gemini/antigravity-cli/conversations` |
 - Optional: the `claude` CLI on `PATH`, for the live log view and for `newsroom.py` live runs
 
 ## Install
@@ -96,6 +97,7 @@ Everything is set with environment variables. All of them are optional.
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code config folder (Claude Code uses the same variable) |
 | `CODEX_HOME` | `~/.codex` | Codex home folder (Codex uses the same variable) |
 | `AGENT_DASH_PI_SESSIONS` | `~/.pi/agent/sessions` | Pi session transcripts |
+| `AGENT_DASH_ANTIGRAVITY_DIR` | `~/.gemini/antigravity-cli` | Antigravity CLI data: one SQLite file per conversation, read read-only |
 | `AGENT_DASH_ROSTER_DIR` | `<CLAUDE_CONFIG_DIR>/agent-roster` | Roster files (below) |
 | `AGENT_DASH_SHARED_DIR` | unset (off) | A folder your agents use to pass work to each other. When set, every touch inside it is drawn as one shared node instead of many file nodes |
 | `AGENT_DASH_SIM_ROOT` | `~/newsroom-sim` | Workspaces for `newsroom.py` |

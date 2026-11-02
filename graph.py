@@ -28,12 +28,14 @@ import json
 import os
 import re
 import shlex
+import sqlite3
 import threading
 import time
 from datetime import datetime
 from pathlib import Path, PurePath
+from urllib.parse import unquote, urlsplit
 
-from paths import CODEX_SESSIONS_DIR, PI_SESSIONS_DIR, PROJECTS_DIR, ROSTER_DIR, SHARED_DIR
+from paths import ANTIGRAVITY_DIR, CODEX_SESSIONS_DIR, PI_SESSIONS_DIR, PROJECTS_DIR, ROSTER_DIR, SHARED_DIR
 GRAPH_WINDOW_S = 6 * 3600   # only transcripts touched in the last 6 h
 ACTIVE_S = 120              # an unanswered call this recent is in flight
 CODEX_ACTIVE_S = 6 * 60      # Codex doesn't have one process id per session; use recent turn events
@@ -51,19 +53,21 @@ SPAWN_TOOLS = {"Agent", "Task"}
 READ_TOOLS = {"Read"}
 TOOL_GROUPS = {
     "files": ({"Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "LS",
-                "read_file", "write_file", "apply_patch", "list_dir", "grep_files", "glob_files",
+                "read_file", "write_file", "edit_file", "apply_patch", "list_dir", "grep_files", "glob_files",
                 "read", "write", "edit", "find", "grep", "ls"}, "files"),
     "shell": ({"Bash", "PowerShell", "BashOutput", "KillShell", "Monitor", "exec",
                 "exec_command", "shell", "powershell", "bash", "run_command", "write_stdin"}, "shell"),
     "agents": ({"Agent", "Task", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop",
                 "TaskOutput", "ListAgents", "spawn_agent", "send_message", "followup_task",
-                "list_agents", "interrupt_agent"}, "agents"),
+                "list_agents", "interrupt_agent", "invoke_subagent", "define_subagent",
+                "manage_subagents", "manage_task"}, "agents"),
     "plan": ({"TodoWrite", "EnterPlanMode", "ExitPlanMode", "AskUserQuestion", "Skill",
               "ToolSearch", "ScheduleWakeup", "request_user_input", "create_goal", "update_goal",
-              "get_goal", "wait"}, "planning"),
+              "get_goal", "wait", "schedule"}, "planning"),
 }
 CODEX_WEB_TOOLS = {"web_search", "web_fetch", "web__run", "browser", "browser_search", "browser_open",
-                   "open", "click", "image_query", "finance", "weather", "sports"}
+                   "open", "click", "image_query", "finance", "weather", "sports",
+                   "search_web", "read_url_content"}   # the last two are Antigravity's
 
 
 def _ts(value):
@@ -95,6 +99,8 @@ def _canonical_domain(value):
         return "claude"
     if compact in {"codex", "codex-cli", "openai-codex"}:
         return "codex"
+    if compact in {"antigravity", "antigravity-cli", "agy", "google-antigravity"}:
+        return "antigravity"
     return compact
 
 
@@ -1067,6 +1073,247 @@ def parse_pi_file(path, now=None):
             "open": open_calls, "events": events[-EVENTS_PER_FILE:], "ships": ships[-SHIP_EVENTS_TOTAL:]}
 
 
+# ---- Antigravity: Google's agent CLI (Gemini models). One SQLite file per conversation in
+# <ANTIGRAVITY_DIR>/conversations/<id>.db; each row of `steps` holds one protobuf step. There is no
+# published schema, so the field numbers below were read off real files (Antigravity CLI, Nov 2026)
+# and every lookup tolerates a missing or malformed field.
+ANTIGRAVITY_ACTIVE_S = 6 * 60
+ANTIGRAVITY_STEP_ROWS = 3000     # newest steps read per conversation
+AG_STEP_USER, AG_STEP_MODEL, AG_STEP_TOOL = 14, 15, 132
+AG_STATUS_RUNNING, AG_STATUS_DONE = 1, 3   # 7 and 9 were a denied and a failed tool call
+
+
+def _pb_varint(data, i):
+    value, shift = 0, 0
+    while True:
+        byte = data[i]
+        i += 1
+        value |= (byte & 0x7F) << shift
+        shift += 7
+        if byte < 0x80:
+            return value, i
+
+
+def _pb_fields(data):
+    """Top-level (field, wire type, value) triples of one protobuf message; [] if it isn't one."""
+    data = data or b""
+    out, i, n = [], 0, len(data)
+    try:
+        while i < n:
+            key, i = _pb_varint(data, i)
+            field, wire = key >> 3, key & 7
+            if wire == 0:
+                value, i = _pb_varint(data, i)
+            elif wire == 2:
+                size, i = _pb_varint(data, i)
+                if i + size > n:
+                    return []
+                value = bytes(data[i:i + size])
+                i += size
+            elif wire == 1:
+                value, i = bytes(data[i:i + 8]), i + 8
+            elif wire == 5:
+                value, i = bytes(data[i:i + 4]), i + 4
+            else:
+                return []
+            out.append((field, wire, value))
+    except IndexError:
+        return []
+    return out if i == n else []
+
+
+def _pb_get(data, *path):
+    """The first value at a field path (each number steps into a nested message), or None."""
+    value = data
+    for number in path:
+        if not isinstance(value, (bytes, bytearray)):
+            return None
+        value = next((v for f, _, v in _pb_fields(value) if f == number), None)
+        if value is None:
+            return None
+    return value
+
+
+def _pb_text(value):
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode("utf-8", errors="replace")
+    return ""
+
+
+def _pb_time(value):
+    """A google.protobuf.Timestamp {1: seconds, 2: nanos} as epoch seconds, or 0."""
+    seconds = _pb_get(value, 1) if isinstance(value, (bytes, bytearray)) else None
+    if not isinstance(seconds, int):
+        return 0.0
+    nanos = _pb_get(value, 2)
+    return seconds + (nanos / 1e9 if isinstance(nanos, int) else 0.0)
+
+
+def _snake_keys(args):
+    """Antigravity spells arguments Path / CommandLine; the shared helpers expect path / command_line."""
+    out = dict(args)
+    for key, value in args.items():
+        if isinstance(key, str):
+            out.setdefault(re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key).lower(), value)
+    return out
+
+
+def _sqlite_ro(path):
+    """Read-only connection that never creates or changes the file (works while Antigravity writes)."""
+    return sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+
+
+def antigravity_summaries(root=None):
+    """conversation id -> row of conversation_summaries.db (title, workspace, status, parent, ...)."""
+    path = Path(root or ANTIGRAVITY_DIR) / "conversation_summaries.db"
+    if not path.is_file():
+        return {}
+    cols = ("conversation_id", "title", "workspace_uris", "status", "parent_conversation_id",
+            "agent_name", "not_fully_idle", "killed")
+    try:
+        con = _sqlite_ro(path)
+        try:
+            con.row_factory = sqlite3.Row
+            rows = con.execute(f"select {', '.join(cols)} from conversation_summaries").fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return {}
+    return {row["conversation_id"]: dict(row) for row in rows if row["conversation_id"]}
+
+
+def antigravity_present(conversation_id, root=None):
+    """True while an Antigravity CLI holds the conversation's presence lock, False once nobody does,
+    None when that can't be told (no lock file, or not Windows, where the lock isn't probed)."""
+    lock = Path(root or ANTIGRAVITY_DIR) / "presence" / f"{conversation_id}.lock"
+    if os.name != "nt" or not lock.is_file():
+        return None
+    try:
+        with lock.open("rb"):
+            return False     # nobody holds it: the CLI that wrote it has exited
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+
+
+def _workspace_path(uris):
+    """The first workspace of a conversation as a local path ("file:///C:/Users/x" -> "C:/Users/x")."""
+    try:
+        first = (json.loads(uris) if isinstance(uris, str) else uris or [])[0]
+    except (ValueError, IndexError, TypeError, KeyError):
+        return ""
+    if not isinstance(first, str) or not first.startswith("file://"):
+        return ""
+    path = unquote(urlsplit(first).path)
+    return path[1:] if re.match(r"^/[A-Za-z]:", path) else path
+
+
+def parse_antigravity_db(path, now=None, summary=None, present=None):
+    """Parse one Antigravity conversation database into the shared agent/resource graph."""
+    now = now or time.time()
+    path = Path(path)
+    conversation_id = path.stem
+    summary = summary or {}
+    agent = "antigravity:" + conversation_id
+    cwd = _workspace_path(summary.get("workspace_uris"))
+    project = Path(cwd).name if cwd else "Antigravity"
+    parent_cid = summary.get("parent_conversation_id") or ""
+    parent_id = "antigravity:" + parent_cid if parent_cid and parent_cid != conversation_id else None
+    nodes, edges, open_calls, events, ships = {}, {}, {}, [], []
+
+    def add_call(name, args, at, end, call_id, status, result):
+        inp = _snake_keys(args)
+        targets = [target_of(name, inp), shared_type_target(name), path_target_from_input(inp, cwd),
+                   shared_target_from_input(inp, cwd)]
+        unique = {}
+        for target in targets:
+            if target:
+                target.setdefault("space", "shared" if target.get("space") == "shared" else "antigravity")
+                unique[target["id"]] = target
+        calls = []
+        detail = detail_of(inp)
+        finished = status != AG_STATUS_RUNNING
+        for target in unique.values():
+            nodes[target["id"]] = {k: target[k] for k in ("kind", "label", "group", "groupLabel", "space")}
+            key = (agent, target["id"], target.get("edge", "call"))
+            edge = edges.setdefault(key, {"count": 0, "lastAt": 0.0})
+            edge["count"] += 1
+            edge["lastAt"] = max(edge["lastAt"], at)
+            ms = max(0, int((end - at) * 1000)) if finished and end and at else None
+            call = {"at": at, "src": agent, "dst": target["id"], "kind": target.get("edge", "call"),
+                    "tool": name, "detail": detail or target.get("detail", ""), "ms": ms}
+            events.append(call)
+            calls.append(call)
+        if not finished and calls:
+            open_calls[call_id or f"{at}:{name}"] = calls
+        steps = ship_steps(command_of(name, inp), cwd)
+        if steps and finished:
+            failed = status != AG_STATUS_DONE or _exit_failed(result)
+            ships.extend(ship_events(agent, call_id, steps, result, end or at, failed))
+
+    try:
+        con = _sqlite_ro(path)
+        try:
+            rows = con.execute("select step_type, status, step_payload from steps order by idx desc limit ?",
+                               (ANTIGRAVITY_STEP_ROWS,)).fetchall()[::-1]
+            gen = con.execute("select data from gen_metadata order by idx desc limit 1").fetchone()
+        finally:
+            con.close()
+        files = [p for p in (path, path.with_name(path.name + "-wal")) if p.exists()]
+        mtime = max(p.stat().st_mtime for p in files)
+    except (sqlite3.Error, OSError, ValueError):
+        return None
+    model = None
+    if gen:
+        model = _pb_text(_pb_get(gen[0], 1, 19)) or _pb_text(_pb_get(gen[0], 3, 28)) or None
+
+    latest_activity, last_type = 0.0, None
+    for step_type, status, payload in rows:
+        meta = _pb_get(payload, 5)
+        at = _pb_time(_pb_get(meta, 6)) or _pb_time(_pb_get(meta, 1))
+        end = _pb_time(_pb_get(meta, 8))
+        latest_activity = max(latest_activity, at, end)
+        last_type = step_type
+        call = _pb_get(meta, 4)
+        if step_type != AG_STEP_TOOL or not isinstance(call, (bytes, bytearray)):
+            continue
+        name = _pb_text(_pb_get(call, 2))
+        if not name:
+            continue
+        try:
+            args = json.loads(_pb_text(_pb_get(call, 3)) or "{}")
+        except ValueError:
+            args = {}
+        result = _pb_text(_pb_get(payload, 140, 2, 1))
+        add_call(name, args if isinstance(args, dict) else {}, at, end, _pb_text(_pb_get(call, 1)), status, result)
+
+    latest_activity = max(latest_activity, mtime)
+    recent = now - latest_activity <= ANTIGRAVITY_ACTIVE_S
+    is_open = present if present is not None else recent
+    if summary.get("killed"):
+        is_open = False
+    if not is_open:
+        open_calls.clear()   # steps left "running" by a CLI that has exited are not in flight
+    running = str(summary.get("status") or "").endswith("_RUNNING") and bool(summary.get("not_fully_idle", 1))
+    working = bool(is_open and recent and (open_calls or running or last_type == AG_STEP_TOOL))
+    title = str(summary.get("agent_name") or summary.get("title") or "").strip()
+    label = f"Antigravity · {project} · {conversation_id[-6:]}"
+    if parent_id:
+        nodes.setdefault(parent_id, {"kind": "agent", "label": f"Antigravity · {project} · {parent_cid[-6:]}",
+                                     "provider": "antigravity", "domain": "antigravity", "space": "antigravity",
+                                     "environment": "local", "cwd": cwd, "mtime": mtime, "open": is_open,
+                                     "_parentStub": True})
+        edges[(parent_id, agent, "spawn")] = {"count": 1, "lastAt": mtime}
+    nodes[agent] = {"kind": "subagent" if parent_id else "agent", "label": label, "name": label,
+                    "parent": parent_id, "provider": "antigravity", "domain": "antigravity",
+                    "space": "antigravity", "environment": "local", "title": title or None,
+                    "state": "working" if working else "idle" if is_open else "done",
+                    "model": model, "cwd": cwd, "mtime": mtime, "open": is_open}
+    return {"agent": agent, "provider": "antigravity", "nodes": nodes, "edges": edges,
+            "open": open_calls, "events": events[-EVENTS_PER_FILE:], "ships": ships[-SHIP_EVENTS_TOTAL:]}
+
+
 def load_rosters(now, directory=None):
     """Roster files touched within the graph window, newest last."""
     directory = directory or ROSTER_DIR
@@ -1221,9 +1468,35 @@ class GraphStore:
                 parsed = parse_pi_file(path, now)
                 if parsed is not None:
                     self._files[path] = (key, parsed)
+        conversations = ANTIGRAVITY_DIR / "conversations"
+        if conversations.is_dir():
+            summaries = None
+            for path in conversations.glob("*.db"):
+                seen.add(path)
+                try:
+                    stats = [p.stat() for p in (path, path.with_name(path.name + "-wal")) if p.exists()]
+                except OSError:
+                    continue
+                newest = max((st.st_mtime for st in stats), default=0.0)
+                if now - newest > GRAPH_WINDOW_S:
+                    self._files.pop(path, None)
+                    continue
+                present = antigravity_present(path.stem)
+                # the presence lock and the "recent" window change with no write to the database,
+                # so both are part of the cache key
+                key = (tuple((st.st_mtime, st.st_size) for st in stats), present,
+                       now - newest <= ANTIGRAVITY_ACTIVE_S)
+                cached = self._files.get(path)
+                if cached and cached[0] == key:
+                    continue
+                if summaries is None:
+                    summaries = antigravity_summaries()
+                parsed = parse_antigravity_db(path, now, summaries.get(path.stem), present)
+                if parsed is not None:
+                    self._files[path] = (key, parsed)
         for path in list(self._files):
             if (PROJECTS_DIR in path.parents or CODEX_SESSIONS_DIR in path.parents or
-                    PI_SESSIONS_DIR in path.parents) and path not in seen:
+                    PI_SESSIONS_DIR in path.parents or conversations in path.parents) and path not in seen:
                 self._files.pop(path, None)
         self._publish(now, load_rosters(now))
 

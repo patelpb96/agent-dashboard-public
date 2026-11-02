@@ -246,12 +246,15 @@ def open_session_ids():
     return out
 
 
+SELF_TRACKED = ("codex", "pi", "antigravity")   # runtimes whose parser decides `open` from their own files
+
+
 def mark_open(nodes, open_ids, now):
     """`open` on every agent: a live session, a running orchestrated run, or a recent subagent of an open one."""
     by_id = {n["id"]: n for n in nodes}
     for n in nodes:
         if n["kind"] == "agent":
-            if n.get("provider") in ("codex", "pi"):
+            if n.get("provider") in SELF_TRACKED:
                 n["open"] = bool(n.get("open"))
             else:
                 n["open"] = n["id"] in open_ids or bool(n.get("rosterLive"))
@@ -260,8 +263,8 @@ def mark_open(nodes, open_ids, now):
             parent = by_id.get(n.get("parent"))
             age = now - (n.get("mtime") or 0)
             recent = age <= SUBAGENT_LIVE_S or (bool(n.get("busy")) and age <= SUBAGENT_BUSY_S)
-            provider_active = n.get("provider") in ("codex", "pi") and bool(n.get("open"))
-            if n.get("provider") in ("codex", "pi"):
+            provider_active = n.get("provider") in SELF_TRACKED and bool(n.get("open"))
+            if n.get("provider") in SELF_TRACKED:
                 n["open"] = provider_active
             else:
                 n["open"] = bool(parent and parent.get("open")) and recent
