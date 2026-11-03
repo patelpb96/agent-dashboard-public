@@ -26,6 +26,9 @@
   const PR_URL = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)$/;
   const JEV_NODE = "mcp:jev:jev_decide";   // the one node Jev calls land on (graph.py target_of)
   const J = window.JevCircuit || null;      // jev.js: the cue rules; without it the plane simply shows no Jev cues
+  const F = window.PlaneFilters || null;    // filters.js: view filters and the cube layout; without it, everything shows
+  const VIEW_KEY = "agent-dashboard-view";  // the filter bar's choices, per viewer
+  const CUBE_SCALE = 0.62;       // a cube's half-size per sphere radius (layoutScene also shrinks the scene a little on cubes)
   const isAgent = n => n.kind === "agent" || n.kind === "subagent";
   const STATE_COLOR = { blocked: "--blocked", working: "--working", idle: "--idle", done: "--done", other: "--other" };
   const DOMAIN_COLORS = { claude: "#e9a960", claude_code: "#e9a960", "claude-code": "#e9a960",
@@ -83,6 +86,13 @@
   try { shipsOpen = localStorage.getItem(SHIPS_KEY) === "1"; } catch (e) { /* storage blocked */ }
   let jevState = J ? J.emptyJev() : null;   // Jev calls seen and the cues showing (jev.js)
   let jevLineEl = null, jevLineText = "";
+  let viewState = loadView();  // filter bar: hidden runtimes and models, Tools & files mode, layout (filters.js)
+  let serverNow = 0;           // generatedAt of the last payload: the clock "Active" is measured against
+  let activeWindow = F ? F.ACTIVE_WINDOW_S : 120;   // the server's activity window (graph.py ACTIVE_S)
+  let jevKeep = false;         // a Jev cue from a shown agent is showing, so the Jev node stays on the plane
+  let filterCount = { count: 0, total: 0 };
+  let cubeHalves = { inner: 60, mid: 120, outer: 170 };
+  let filterBar = null;        // the filter bar's elements, once init has found them
 
   const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
@@ -127,6 +137,7 @@
   }
 
   function domainOf(node) {
+    if (F) return F.canonicalDomain(node.domain || node.provider || "other");
     const raw = String(node.domain || node.provider || "other").toLowerCase();
     return ({ "claude-code": "claude", claude_code: "claude", "claude code": "claude", anthropic: "claude",
       "codex-cli": "codex", codex_cli: "codex", openai: "codex", gpt: "codex",   // one "GPT" runtime
@@ -218,6 +229,18 @@
     try { localStorage.setItem(FOLD_KEY, JSON.stringify([...folded])); } catch { /* storage blocked */ }
   }
 
+  function loadView() {
+    if (!F) return null;
+    try { return F.parseView(localStorage.getItem(VIEW_KEY)); } catch { return F.defaultView(); }
+  }
+  function saveView() {
+    if (!F) return;
+    try { localStorage.setItem(VIEW_KEY, F.serializeView(viewState)); } catch { /* storage blocked */ }
+  }
+  function isCube() { return !!(F && viewState && viewState.layout === "cube"); }
+  // On the plane: not leaving, and not hidden by the filter bar.
+  function onPlane(n) { return !!n && !n.gone && !n.filtered; }
+
   // Markdown is its own stratum: skills, and any file whose name ends in .md.
   function isMarkdown(n) {
     return n.kind === "skill" || (n.kind === "doc" && /\.md$/i.test(String(n.label || "")));
@@ -298,11 +321,30 @@
     return entries.reduce((sum, [domain, weight]) => sum.map((v, i) => v + domainSites.get(domain)[i] * Number(weight) / total), [0,0,0]);
   }
 
+  // A runtime's agents in spiral order: each subagent right after its parent, so it lands near it.
+  function orderWithChildren(list, ids, byId) {
+    const children = new Map();
+    for (const n of list) if (n.kind === "subagent" && ids.has(n.parent)) {
+      if (!children.has(n.parent)) children.set(n.parent, []);
+      children.get(n.parent).push(n);
+    }
+    const ordered = [], seen = new Set();
+    const visit = n => {
+      if (seen.has(n.id)) return;
+      seen.add(n.id); ordered.push(n);
+      for (const child of (children.get(n.id) || []).sort(byId)) visit(child);
+    };
+    list.filter(n => !(n.kind === "subagent" && ids.has(n.parent))).sort(byId).forEach(visit);
+    list.sort(byId).forEach(visit);   // anything left (a parent loop) still gets a spot
+    return ordered;
+  }
+
   function layoutScene() {
-    const hasMarkdown = [...nodes.values()].some(n => !n.gone && isMarkdown(n));
-    // leave room for the .md shell when there is one
-    sceneRadius = Math.max(130, Math.min(width, height) * 0.46 / (hasMarkdown ? 1.32 : 1));
-    const agents = [...nodes.values()].filter(n => !n.gone && isAgent(n));
+    const hasMarkdown = [...nodes.values()].some(n => onPlane(n) && isMarkdown(n));
+    const cube = isCube();
+    // leave room for the .md shell when there is one, and for the cube corners nearest the camera
+    sceneRadius = Math.max(130, Math.min(width, height) * 0.46 / (hasMarkdown ? 1.32 : 1) / (cube ? 1.2 : 1));
+    const agents = [...nodes.values()].filter(n => onPlane(n) && isAgent(n));
     const domains = agents.map(domainOf);
     domainSites = makeDomainSites(domains);
     domainMeta = new Map();
@@ -338,8 +380,28 @@
       byDomain.set(domainOf(n), list);
     }
     domainBalls = new Map();
+    // Cube layout: three nested cubes. Their corners reach about as far as the spheres did, and the inner one
+    // grows when there are many agents, up to most of the resource cube.
+    const midHalf = surfaceRadius() * CUBE_SCALE;
+    cubeHalves = {
+      inner: Math.min(midHalf * 0.8, Math.max(agentShellRadius() * CUBE_SCALE, spacing * Math.sqrt(agents.length / 3))),
+      mid: midHalf,
+      outer: midHalf * MD_SHELL,
+    };
     for (const [domain, list] of byDomain) {
       const radius = Math.max(spacing * 0.8, spacing * Math.sqrt(list.length / (4 * Math.PI)));
+      if (cube) {
+        // Each runtime keeps its own region: a patch of the inner cube around its direction, agents about one
+        // spacing apart (a sunflower spiral), subagents next to their parent as on the spheres.
+        const half = cubeHalves.inner, dir = domainDir(domain), stepAngle = spacing / half / 1.7;
+        const ids = new Set(list.map(n => n.id)), ordered = orderWithChildren(list, ids, byId);
+        ordered.forEach((n, i) => {
+          n.anchorDir = sphericalPatchPoint(dir, i * goldenAngle, Math.min(1.25, stepAngle * Math.sqrt(i + 0.5)));
+          n.ball = domain;
+          [n.ax, n.ay, n.az] = F.cubePoint(n.anchorDir, half);
+        });
+        continue;
+      }
       // step back from each dividing plane: the sum of the planes' normals, pointing to our side
       const dir = domainDir(domain);
       let away = [0, 0, 0];
@@ -349,19 +411,7 @@
       }
       const center = Math.hypot(...away) > 1e-6 ? normalize3(away).map(value => value * (radius + spacing * 0.6)) : [0, 0, 0];
       domainBalls.set(domain, { center, radius });
-      const ids = new Set(list.map(n => n.id)), children = new Map();
-      for (const n of list) if (n.kind === "subagent" && ids.has(n.parent)) {
-        if (!children.has(n.parent)) children.set(n.parent, []);
-        children.get(n.parent).push(n);
-      }
-      const ordered = [], seen = new Set();
-      const visit = n => {
-        if (seen.has(n.id)) return;
-        seen.add(n.id); ordered.push(n);
-        for (const child of (children.get(n.id) || []).sort(byId)) visit(child);
-      };
-      list.filter(n => !(n.kind === "subagent" && ids.has(n.parent))).sort(byId).forEach(visit);
-      list.sort(byId).forEach(visit);   // anything left (a parent loop) still gets a spot
+      const ordered = orderWithChildren(list, new Set(list.map(n => n.id)), byId);
       ordered.forEach((n, i) => {
         const y = 1 - 2 * (i + 0.5) / ordered.length, r = Math.sqrt(Math.max(0, 1 - y * y)), t = i * goldenAngle;
         n.anchorDir = [Math.cos(t) * r, y, Math.sin(t) * r];
@@ -371,16 +421,17 @@
     }
     const resourceClusters = new Map();
     // Skills spread evenly over the .md shell (a Fibonacci sphere in id order).
-    const skills = [...nodes.values()].filter(n => n.kind === "skill" && !n.gone)
+    const skills = [...nodes.values()].filter(n => n.kind === "skill" && onPlane(n))
       .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    // On a cube a point keeps its direction and moves out to the cube's surface (filters.js cubePoint).
+    const onStratum = (dir, sphereRadius, cubeHalf) => cube ? F.cubePoint(dir, cubeHalf) : dir.map(value => value * sphereRadius);
     skills.forEach((n, i) => {
       const y = 1 - 2 * (i + 0.5) / skills.length, r = Math.sqrt(Math.max(0, 1 - y * y)), t = i * goldenAngle;
-      const shell = surfaceRadius() * MD_SHELL;
-      [n.ax, n.ay, n.az] = [Math.cos(t) * r * shell, y * shell, Math.sin(t) * r * shell];
+      [n.ax, n.ay, n.az] = onStratum([Math.cos(t) * r, y, Math.sin(t) * r], surfaceRadius() * MD_SHELL, cubeHalves.outer);
       Object.assign(n, { surfaceCluster: null, surfaceClusterSize: skills.length, foldHidden: false, foldCount: 0 });
     });
     for (const n of nodes.values()) {
-      if (isAgent(n) || n.gone || n.kind === "skill") continue;
+      if (isAgent(n) || !onPlane(n) || n.kind === "skill") continue;
       const key = resourceClusterKey(n);
       let cluster = resourceClusters.get(key);
       if (!cluster) resourceClusters.set(key, cluster = { key, members: [], weights: {} });
@@ -403,23 +454,25 @@
       peers.push(cluster);
       clustersByAffinity.set(cluster.affinity, peers);
     }
+    // A cube face sits nearer the centre than the sphere did, so the same angle is a shorter step on it: spread more.
+    const spread = cube ? 1.45 : 1;
     for (const [affinity, clusters] of clustersByAffinity) {
       clusters.sort((a, b) => a.key.localeCompare(b.key));
-      const cap = clusters.length < 2 ? 0 : Math.min(0.74, 0.12 + 0.11 * Math.sqrt(clusters.length));
+      const cap = clusters.length < 2 ? 0 : spread * Math.min(0.74, 0.12 + 0.11 * Math.sqrt(clusters.length));
       clusters.forEach((cluster, clusterIndex) => {
         const clusterAngle = clusterIndex * goldenAngle + hash01(affinity) * Math.PI * 2;
         const clusterDistance = cap * Math.sqrt((clusterIndex + 0.5) / clusters.length);
         cluster.direction = sphericalPatchPoint(cluster.direction, clusterAngle, clusterDistance);
         const memberCount = cluster.members.length;
         const fold = memberCount > 1 && folded.has(cluster.key);
-        const memberSpread = memberCount < 2 || fold ? 0 : Math.min(0.24, 0.045 * Math.sqrt(memberCount));
+        const memberSpread = memberCount < 2 || fold ? 0 : spread * Math.min(0.24, 0.045 * Math.sqrt(memberCount));
         cluster.members.forEach((n, memberIndex) => {
           const angle = memberIndex * goldenAngle + hash01(cluster.key) * Math.PI * 2;
           const distance = memberSpread * Math.sqrt((memberIndex + 0.5) / memberCount);
           const point = sphericalPatchPoint(cluster.direction, angle, distance);
           // a .md keeps its place in its folder's patch, one stratum further out
-          const shell = surfaceRadius() * (isMarkdown(n) ? MD_SHELL : 1);
-          [n.ax, n.ay, n.az] = point.map(value => value * shell);
+          const md = isMarkdown(n);
+          [n.ax, n.ay, n.az] = onStratum(point, surfaceRadius() * (md ? MD_SHELL : 1), md ? cubeHalves.outer : cubeHalves.mid);
           n.surfaceCluster = cluster.key;
           n.surfaceClusterSize = memberCount;
           n.foldHidden = fold && memberIndex > 0;   // a folded cluster shows only its first member
@@ -531,19 +584,18 @@
     for (const [id, node] of nodes) {
       if (!seen.has(id) && !node.gone) node.gone = performance.now();
     }
-    layoutScene();
-    for (const n of nodes.values()) if (!n.placed && !n.gone) {
-      n.x = n.dx = n.ax; n.y = n.dy = n.ay; n.z = n.dz = n.az; n.placed = true;
-    }
     const keep = new Set();
     for (const e of data.edges) {
       const key = e.src + "|" + e.dst + "|" + e.kind;
       keep.add(key);
       const cur = edges.get(key) || { key, src: e.src, dst: e.dst, kind: e.kind, intensity: 0 };
-      Object.assign(cur, { count: e.count, active: e.active, pulse: e.pulse });
+      Object.assign(cur, { count: e.count, active: e.active, pulse: e.pulse, lastAt: e.lastAt });
       edges.set(key, cur);
     }
     for (const key of [...edges.keys()]) if (!keep.has(key)) edges.delete(key);
+    if (Number.isFinite(raw.generatedAt)) serverNow = raw.generatedAt;
+    if (Number.isFinite(raw.activeWindow) && raw.activeWindow > 0) activeWindow = raw.activeWindow;
+    applyFilter();   // which nodes the filter bar shows, then the layout over just those
     simAlpha = Math.max(simAlpha, 0.6);  // new data reheats the layout a little
     agentNames = new Map(raw.nodes.filter(isAgent).map(n => [n.id, n.name || n.label || n.id]));
     // A server that has not read its transcripts yet sends no generatedAt; wait for it before priming.
@@ -551,6 +603,173 @@
       takeShips(Array.isArray(raw.ships) ? raw.ships : [], raw.generatedAt);
       takeJevs(Array.isArray(raw.jevs) ? raw.jevs : [], raw.generatedAt);
     }
+  }
+
+  // ---- Filter bar: which nodes are on the plane (filters.js decides), then a fresh layout over just those, so the
+  // nodes left spread out instead of leaving holes. A node coming back fades in at its new spot.
+  function applyFilter() {
+    const list = [...nodes.values()].filter(n => !n.gone);
+    const out = F ? F.filterGraph(list, [...edges.values()], viewState,
+      { now: serverNow, activeWindow, keep: jevKeep ? [JEV_NODE] : [] }) : null;
+    const now = performance.now();
+    for (const n of list) {
+      const hidden = !!out && !out.shown.has(n.id);
+      if (hidden) n.filtered = true;
+      else if (n.filtered) { n.filtered = false; n.placed = false; n.born = now; }
+      n.recent = !!out && out.recent.has(n.id);
+    }
+    filterCount = { count: list.filter(n => !n.filtered).length, total: list.length };
+    dropFilteredSelection();
+    layoutScene();
+    for (const n of nodes.values()) if (!n.placed && onPlane(n)) {
+      n.x = n.dx = n.ax; n.y = n.dy = n.ay; n.z = n.dz = n.az; n.vx = n.vy = n.vz = 0; n.placed = true;
+    }
+    renderFilterBar();
+  }
+
+  // A hidden node cannot stay hovered, selected, or the camera's centre.
+  function dropFilteredSelection() {
+    const hidden = id => { const n = nodes.get(id); return !!n && !!n.filtered; };
+    if (hover && hover.filtered) hover = null;
+    if (cameraTargetId && hidden(cameraTargetId)) cameraTargetId = null;
+    if (!panel) return;
+    const edge = selectedKey && edges.get(selectedKey);
+    if ((selectedAgent && hidden(selectedAgent)) || (edge && (hidden(edge.src) || hidden(edge.dst)))) { closeFlow(); return; }
+    let dropped = false;
+    for (const id of [...selectedItems.keys()]) if (hidden(id)) { selectedItems.delete(id); dropped = true; }
+    if (dropped) { if (selectedItems.size) renderSelectionPanel(); else closeFlow(); }
+    syncCenterButton();
+  }
+
+  // The Jev node stays on the plane in Tools & files "None" (or "Active") while a cue from a shown agent is showing.
+  function jevCueShowing(now) {
+    if (!J || !jevState || !jevState.cues.length) return false;
+    return jevState.cues.some(c => onPlane(nodes.get(c.source)) && J.frameAt(c, now, REDUCED).stage !== "gone");
+  }
+
+  function syncJevKeep(now) {
+    const keep = jevCueShowing(now);
+    if (keep === jevKeep) return;
+    jevKeep = keep;
+    applyFilter();
+  }
+
+  function setView(change) {
+    if (!F) return;
+    const before = viewState.layout;
+    viewState = F.normalizeView({ ...viewState, ...change });
+    saveView();
+    applyFilter();
+    simAlpha = Math.max(simAlpha, 0.6);
+    if (viewState.layout !== before && REDUCED) {   // reduced motion: jump to the new layout, no travel
+      for (const n of nodes.values()) if (onPlane(n)) { n.x = n.dx = n.ax; n.y = n.dy = n.ay; n.z = n.dz = n.az; }
+    }
+  }
+
+  // Runtime chips and the Model menu are rebuilt only when what they list changes, so focus stays put.
+  let filterBarKey = "";
+  function renderFilterBar() {
+    if (!filterBar || !F) return;
+    const agents = [...nodes.values()].filter(n => !n.gone && isAgent(n));
+    const runtimes = F.runtimesPresent(agents);
+    const key = JSON.stringify([runtimes.map(r => [r.domain, r.count, r.models.map(m => [m.key, m.count])]), viewState]);
+    filterBar.count.textContent = `showing ${filterCount.count} of ${filterCount.total}`;
+    filterBar.count.title = `${agents.filter(n => !n.filtered).length} of ${agents.length} agents shown`;
+    filterBar.reset.disabled = F.isDefaultView(viewState);
+    for (const b of filterBar.resourceButtons) b.setAttribute("aria-pressed", String(b.dataset.pfResources === viewState.resources));
+    if (filterBar.activeButton) {
+      filterBar.activeButton.title = `Only tools and files in use now or in the last ${Math.max(1, Math.round(activeWindow / 60))} min`;
+    }
+    for (const b of filterBar.layoutButtons) b.setAttribute("aria-pressed", String(b.dataset.pfLayout === viewState.layout));
+    if (key === filterBarKey) return;
+    filterBarKey = key;
+    const active = document.activeElement;
+    const focused = active && filterBar.root.contains(active) ? (active.dataset.pfDomain || active.dataset.pfModel || null) : null;
+    const chips = runtimes.map(r => {
+      const shown = !viewState.hiddenRuntimes.includes(r.domain);
+      const chip = el("button", "pf-chip");
+      chip.type = "button";
+      chip.dataset.pfDomain = r.domain;
+      chip.setAttribute("aria-pressed", String(shown));
+      chip.title = `${shown ? "Hide" : "Show"} ${r.name} agents`;
+      const swatch = el("span", "pf-swatch");
+      swatch.style.setProperty("--pf-color", domainColor(r.domain));
+      chip.append(swatch, el("span", "", r.name), el("span", "pf-n", String(r.count)));
+      return chip;
+    });
+    filterBar.runtimes.replaceChildren(...(chips.length ? chips : [el("span", "pf-empty", "no agents")]));
+    const hiddenModels = runtimes.reduce((sum, r) => sum + r.models.filter(m => viewState.hiddenModels.includes(m.key)).length, 0);
+    filterBar.modelsSummary.textContent = hiddenModels ? `Model · ${hiddenModels} hidden` : "Model";
+    const groups = runtimes.map(r => {
+      const off = viewState.hiddenRuntimes.includes(r.domain);
+      const set = el("fieldset", "pf-model-group");
+      set.disabled = off;
+      set.append(el("legend", "", off ? `${r.name} (hidden)` : r.name));
+      for (const m of r.models) {
+        const label = el("label", "pf-model");
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.dataset.pfModel = m.key;
+        box.checked = !viewState.hiddenModels.includes(m.key);
+        label.append(box, el("span", "pf-model-name", m.model || "unknown model"), el("span", "pf-n", String(m.count)));
+        set.append(label);
+      }
+      return set;
+    });
+    const all = button("Show all models", () => setView({ hiddenModels: [] }));
+    all.className = "pf-all";
+    all.disabled = !viewState.hiddenModels.length;
+    filterBar.modelMenu.replaceChildren(...(groups.length ? groups : [el("div", "pf-empty", "no agents")]), all);
+    if (focused) {
+      const again = [...filterBar.root.querySelectorAll("[data-pf-domain], [data-pf-model]")]
+        .find(node => node.dataset.pfDomain === focused || node.dataset.pfModel === focused);
+      if (again) again.focus();
+    }
+  }
+
+  function initFilterBar() {
+    const root = document.getElementById("plane-filters");
+    if (!root) return;
+    if (!F) { root.hidden = true; return; }
+    filterBar = {
+      root,
+      runtimes: root.querySelector("#pf-runtimes"),
+      models: root.querySelector("#pf-models"),
+      modelsSummary: root.querySelector("#pf-models summary"),
+      modelMenu: root.querySelector("#pf-model-menu"),
+      resourceButtons: [...root.querySelectorAll("[data-pf-resources]")],
+      activeButton: root.querySelector('[data-pf-resources="active"]'),
+      layoutButtons: [...root.querySelectorAll("[data-pf-layout]")],
+      count: root.querySelector("#pf-count"),
+      reset: root.querySelector("#pf-reset"),
+    };
+    filterBar.runtimes.addEventListener("click", e => {
+      const chip = e.target.closest("[data-pf-domain]");
+      if (!chip) return;
+      const domain = chip.dataset.pfDomain, hidden = viewState.hiddenRuntimes;
+      setView({ hiddenRuntimes: hidden.includes(domain) ? hidden.filter(d => d !== domain) : [...hidden, domain] });
+    });
+    filterBar.modelMenu.addEventListener("change", e => {
+      const box = e.target.closest("[data-pf-model]");
+      if (!box) return;
+      const key = box.dataset.pfModel, rest = viewState.hiddenModels.filter(k => k !== key);
+      setView({ hiddenModels: box.checked ? rest : [...rest, key] });
+    });
+    for (const b of filterBar.resourceButtons) b.addEventListener("click", () => setView({ resources: b.dataset.pfResources }));
+    for (const b of filterBar.layoutButtons) b.addEventListener("click", () => setView({ layout: b.dataset.pfLayout }));
+    filterBar.reset.addEventListener("click", () => setView(F.defaultView()));
+    // The Model menu closes on a click elsewhere, and on Escape (focus goes back to its button).
+    document.addEventListener("click", e => {
+      if (filterBar.models.open && !filterBar.models.contains(e.target)) filterBar.models.open = false;
+    });
+    filterBar.models.addEventListener("keydown", e => {
+      if (e.key === "Escape" && filterBar.models.open) {
+        e.stopPropagation();
+        filterBar.models.open = false;
+        filterBar.modelsSummary.focus();
+      }
+    });
+    renderFilterBar();
   }
 
   // ---- Ship events: a successful push or PR sends a beam of light out of the agent and its repo folder.
@@ -572,7 +791,7 @@
     const key = "files:" + String(group).toLowerCase();
     let first = null;
     for (const n of nodes.values()) {
-      if (n.gone || n.surfaceCluster !== key) continue;
+      if (!onPlane(n) || n.surfaceCluster !== key) continue;
       if (!first || String(n.id).localeCompare(String(first.id)) < 0) first = n;
     }
     return first;
@@ -582,7 +801,7 @@
     const born = performance.now();
     const reach = ship.step === "pr" ? 1.15 : 1, width = ship.step === "pr" ? 1.35 : 1;   // a PR is the bigger moment
     const agent = nodes.get(ship.agent);
-    if (agent && !agent.gone && isAgent(agent)) {
+    if (onPlane(agent) && isAgent(agent)) {
       beams.push({ id: agent.id, color: domainColor(domainOf(agent)), born, reach, width });
     }
     const folder = ship.target && folderNode(ship.target);
@@ -600,10 +819,16 @@
     for (let i = beams.length - 1; i >= 0; i--) {
       const beam = beams[i], n = nodes.get(beam.id), t = (now - beam.born) / life;
       if (t >= 1 || !n || (n.gone && now - n.gone >= 900)) { beams.splice(i, 1); continue; }
-      const ball = isAgent(n) ? domainBalls.get(n.ball) : null;
-      let ux = n.dx - (ball ? ball.center[0] : 0), uy = n.dy - (ball ? ball.center[1] : 0), uz = n.dz - (ball ? ball.center[2] : 0);
-      const d = Math.hypot(ux, uy, uz);
-      if (d < 1e-6) { ux = 0; uy = -1; uz = 0; } else { ux /= d; uy /= d; uz /= d; }
+      if (n.filtered) continue;   // hidden by the filter bar: no beam
+      let ux, uy, uz;
+      if (isCube()) {
+        [ux, uy, uz] = F.cubeNormal([n.dx, n.dy, n.dz]);   // straight out of the cube face it sits on
+      } else {
+        const ball = isAgent(n) ? domainBalls.get(n.ball) : null;
+        ux = n.dx - (ball ? ball.center[0] : 0); uy = n.dy - (ball ? ball.center[1] : 0); uz = n.dz - (ball ? ball.center[2] : 0);
+        const d = Math.hypot(ux, uy, uz);
+        if (d < 1e-6) { ux = 0; uy = -1; uz = 0; } else { ux /= d; uy /= d; uz /= d; }
+      }
       // Reduced motion: no growth and no fade, the beam simply stands for a moment.
       const grow = REDUCED ? 1 : 1 - Math.pow(1 - Math.min(1, t / 0.3), 3);   // shoots out fast, then holds
       const fade = REDUCED ? 1 : 1 - t * t;
@@ -684,13 +909,13 @@
   function drawJevCues(now) {
     if (!jevState || !jevState.cues.length) return;   // nothing showing: no work this frame
     const node = nodes.get(JEV_NODE);
-    const lens = node && !node.gone && !node.foldHidden && Number.isFinite(node.sx) ? node : null;
+    const lens = onPlane(node) && !node.foldHidden && Number.isFinite(node.sx) ? node : null;
     ctx.save();
     ctx.globalCompositeOperation = "source-over";
     ctx.lineCap = "butt"; ctx.lineJoin = "miter";
     for (const c of jevState.cues) {
       const agent = nodes.get(c.source);
-      if (!agent || agent.gone || agent.foldHidden || !isAgent(agent) || !Number.isFinite(agent.sx)) continue;
+      if (!onPlane(agent) || agent.foldHidden || !isAgent(agent) || !Number.isFinite(agent.sx)) continue;
       const f = J.frameAt(c, now, REDUCED);
       if (f.stage === "gone") continue;
       if (f.stage === "mark") { drawJevMarker(agent, f.outcome, REDUCED ? 1 : 1 - 0.6 * f.t); continue; }
@@ -726,7 +951,7 @@
     jevState = J.pruneJev(jevState, now);
     const text = jevState.cues.length ? J.jevLine(jevState, now, id => {
       const n = nodes.get(id);
-      return n && !n.gone && isAgent(n) ? truncate(n.name || n.label || id, 40) : null;
+      return onPlane(n) && isAgent(n) ? truncate(n.name || n.label || id, 40) : null;
     }) : "";
     if (text === jevLineText) return;
     jevLineText = text;
@@ -738,10 +963,13 @@
   // tool family, arranged near the weighted center of the runtime spaces that use them.
   function step(now) {
     simAlpha = Math.max(0.02, simAlpha * 0.985);
+    const cube = isCube();
+    // on the cube an agent may wander about two spacings from its spot (the spheres use agentWander)
+    const cubeWander = Math.min(agentWander, 2 * agentSpacingPx / Math.max(1, cubeHalves.inner));
     const agents = [];
     for (const [id, n] of nodes) {
       if (n.gone && now - n.gone >= 900) { nodes.delete(id); continue; }
-      if (n.gone) continue;
+      if (n.gone || n.filtered) continue;
       if (isAgent(n)) { agents.push(n); n.fx = 0; n.fy = 0; n.fz = 0; n.sw = 0; n.sx = 0; n.sy = 0; n.sz = 0; }
       else {
         n.x += (n.ax - n.x) * 0.09; n.y += (n.ay - n.y) * 0.09; n.z += (n.az - n.z) * 0.09;
@@ -765,7 +993,7 @@
     }
     for (const e of edges.values()) {
       const a = nodes.get(e.src), b = nodes.get(e.dst);
-      if (!a || !b || a.gone || b.gone) continue;
+      if (!onPlane(a) || !onPlane(b)) continue;
       const aa = isAgent(a), ba = isAgent(b);
       if (aa && ba) {
         if (e.kind === "spawn" || e.kind === "reports") {
@@ -798,9 +1026,17 @@
       const speed = Math.hypot(n.vx, n.vy, n.vz);
       if (speed > maxV) { n.vx *= maxV / speed; n.vy *= maxV / speed; n.vz *= maxV / speed; }
       n.x += n.vx; n.y += n.vy; n.z += n.vz;
-      // forces only slide an agent over its runtime's sphere, and only a little way from its spot
+      // forces only slide an agent over its runtime's sphere (or the inner cube), and only a little way from its spot
       const ball = domainBalls.get(n.ball);
-      if (ball && n.anchorDir) {
+      if (cube && n.anchorDir) {
+        let dir = Math.hypot(n.x, n.y, n.z) > 1e-6 ? normalize3([n.x, n.y, n.z]) : n.anchorDir;
+        const c = Math.max(-1, Math.min(1, dot3(dir, n.anchorDir)));
+        if (Math.acos(c) > cubeWander) {
+          const perp = normalize3(dir.map((value, i) => value - n.anchorDir[i] * c));
+          dir = n.anchorDir.map((value, i) => value * Math.cos(cubeWander) + perp[i] * Math.sin(cubeWander));
+        }
+        [n.x, n.y, n.z] = F.cubePoint(dir, cubeHalves.inner);
+      } else if (ball && n.anchorDir) {
         const off = [n.x - ball.center[0], n.y - ball.center[1], n.z - ball.center[2]];
         let dir = Math.hypot(...off) > 1e-6 ? normalize3(off) : n.anchorDir;
         const c = Math.max(-1, Math.min(1, dot3(dir, n.anchorDir)));
@@ -833,7 +1069,7 @@
   function nodeAt(sx, sy) {
     let best = null, bestD = 18;
     for (const n of nodes.values()) {
-      if (n.gone || n.foldHidden || !Number.isFinite(n.sx)) continue;
+      if (!onPlane(n) || n.foldHidden || !Number.isFinite(n.sx)) continue;
       const d = Math.hypot(n.sx - sx, n.sy - sy);
       if (d < bestD) { best = n; bestD = d; }
     }
@@ -854,7 +1090,7 @@
     for (const e of edges.values()) {
       if (e.intensity < 0.05) continue;  // any line still drawn can be clicked
       const a = nodes.get(e.src), b = nodes.get(e.dst);
-      if (!a || !b || a.gone || b.gone || !Number.isFinite(a.sx) || !Number.isFinite(b.sx)) continue;
+      if (!onPlane(a) || !onPlane(b) || !Number.isFinite(a.sx) || !Number.isFinite(b.sx)) continue;
       const d = segmentDistance(sx, sy, a, b);
       if (d < bestD) { best = e; bestD = d; }
     }
@@ -961,8 +1197,16 @@
     for (const [domain, site] of domainSites) {
       const color = domainColor(domain), meta = domainMeta.get(domain) || { count: 0, cloud: false };
       const ball = domainBalls.get(domain);   // the name sits just above the runtime's own sphere
-      const labelPoint = ball ? cameraPoint([ball.center[0], ball.center[1] - ball.radius - 16, ball.center[2]])
-                              : cameraPoint([site[0], site[1] - sceneRadius * 0.28, site[2]]);
+      let labelPoint = ball ? cameraPoint([ball.center[0], ball.center[1] - ball.radius - 16, ball.center[2]])
+                            : cameraPoint([site[0], site[1] - sceneRadius * 0.28, site[2]]);
+      if (isCube()) {   // on the cube: just above the runtime's agents as they appear on screen
+        let top = Infinity, sumX = 0, count = 0;
+        for (const n of nodes.values()) {
+          if (!onPlane(n) || !isAgent(n) || domainOf(n) !== domain || !Number.isFinite(n.sx)) continue;
+          top = Math.min(top, n.sy - radiusOf(n)); sumX += n.sx; count++;
+        }
+        if (count) labelPoint = { x: sumX / count, y: top - 16 };
+      }
       ctx.font = "600 11px system-ui, sans-serif";
       ctx.textAlign = "center";
       ctx.fillStyle = withAlpha(color, 0.94);
@@ -1011,7 +1255,7 @@
       shells.unshift({ center: ball.center, radius: ball.radius, dash: [], color: domainColor(domain), rings: SHELL_RINGS,
                        label: "" });
     }
-    if ([...nodes.values()].some(n => !n.gone && isMarkdown(n))) {
+    if ([...nodes.values()].some(n => onPlane(n) && isMarkdown(n))) {
       shells.push({ radius: surfaceRadius() * MD_SHELL, dash: [3, 4], color: colors.accent,
                     rings: SKILL_RINGS, label: ".md \u00b7 skills" });
     }
@@ -1047,12 +1291,45 @@
     ctx.restore();
   }
 
+  // Cube layout: the same strata as nested wireframe cubes, 12 edges each, at the Outline knob's opacity. The inner
+  // agent cube is dotted, the resource cube solid, the .md cube dashed in the accent colour; near edges are brighter.
+  function drawCubes() {
+    const cubes = [{ half: cubeHalves.inner, dash: [2, 3], color: colors.muted, label: "" },
+                   { half: cubeHalves.mid, dash: [], color: colors.muted, label: "files · tools" }];
+    if ([...nodes.values()].some(n => onPlane(n) && isMarkdown(n))) {
+      cubes.push({ half: cubeHalves.outer, dash: [3, 4], color: colors.accent, label: ".md · skills" });
+    }
+    // The cubes are the point of Cube mode, so they stay visible at the slider's faint default; the slider only raises them.
+    const alpha = Math.max(outlineOpacity, 0.3), c = cameraPoint([0, 0, 0]);
+    ctx.save();
+    ctx.lineWidth = 0.9;
+    ctx.font = "10px system-ui, sans-serif"; ctx.textAlign = "center";
+    for (const cube of cubes) {
+      const front = new Path2D(), back = new Path2D();
+      let top = Infinity, left = Infinity, right = -Infinity;
+      for (const [a3, b3] of F.cubeEdges(cube.half)) {
+        const a = cameraPoint(a3), b = cameraPoint(b3);
+        const path = a.depth + b.depth > 2 * c.depth ? front : back;
+        path.moveTo(a.x, a.y); path.lineTo(b.x, b.y);
+        top = Math.min(top, a.y, b.y); left = Math.min(left, a.x, b.x); right = Math.max(right, a.x, b.x);
+      }
+      ctx.setLineDash(cube.dash);
+      ctx.strokeStyle = withAlpha(cube.color, alpha); ctx.stroke(front);
+      ctx.strokeStyle = withAlpha(cube.color, alpha * 0.4); ctx.stroke(back);
+      if (cube.label) {
+        ctx.fillStyle = withAlpha(cube.color, 0.45 + alpha * 0.55);   // the names stay readable
+        ctx.fillText(cube.label, (left + right) / 2, top - 6);
+      }
+    }
+    ctx.restore();
+  }
+
   // Each folder or tool family with two or more members gets a faint hull and a name. Clicking the
   // name folds the group into one node with a count, and clicking it again spreads it back out.
-  function drawResourceClusterHints() {
+  function drawResourceClusterHints(labelKeys) {
     const clusters = new Map();
     for (const n of nodes.values()) {
-      if (isAgent(n) || n.gone || !n.surfaceCluster || !Number.isFinite(n.sx)) continue;
+      if (isAgent(n) || !onPlane(n) || !n.surfaceCluster || !Number.isFinite(n.sx)) continue;
       const members = clusters.get(n.surfaceCluster) || [];
       members.push(n);
       clusters.set(n.surfaceCluster, members);
@@ -1061,10 +1338,11 @@
     ctx.save();
     ctx.globalAlpha = 1;
     ctx.lineCap = "round";
-    // Biggest groups claim label space first; a label that would overlap one already drawn waits
-    // until you hover its group (or it is folded).
+    // Groups in use claim label space first, then the biggest; a label past the cap, or one that would overlap one
+    // already drawn, waits until you hover its group (or it is folded).
+    const inUse = members => members.some(n => n.recent);
     const ordered = [...clusters].filter(([, members]) => members.length >= 2)
-      .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+      .sort((a, b) => inUse(b[1]) - inUse(a[1]) || b[1].length - a[1].length || a[0].localeCompare(b[0]));
     for (const [key, members] of ordered) {
       const colorWeights = {};
       for (const n of members) for (const [domain, weight] of Object.entries(n.domainWeights || {})) {
@@ -1103,6 +1381,7 @@
       const x = (left + right) / 2 - w / 2, y = top.y - (isFolded ? 22 : 14) - h;
       const hot = hoverLabel === key;
       const asked = hot || isFolded || (hover && hover.surfaceCluster === key);
+      if (!asked && labelKeys && !labelKeys.has("cluster:" + key)) continue;
       const overlaps = clusterLabels.some(l => x < l.x + l.w && x + w > l.x && y < l.y + l.h && y + h > l.y);
       if (overlaps && !asked) continue;
       ctx.globalAlpha = hot ? 1 : 0.3 + 0.5 * near;
@@ -1138,15 +1417,18 @@
       const p = cameraPoint([n.dx, n.dy, n.dz]);
       n.sx = p.x; n.sy = p.y; n.depth = p.depth; n.projectScale = p.scale;
     }
-    drawCellMesh();
+    const cube = isCube();
+    if (!cube) drawCellMesh();   // the dividers are circles on the sphere envelope: on the cube they are dropped
     drawDomains();
-    drawShells();
-    drawResourceClusterHints();
+    if (cube) drawCubes(); else drawShells();
+    const labelKeys = frameLabels();
+    drawResourceClusterHints(labelKeys);
 
     ctx.globalCompositeOperation = colors.crisp ? "source-over" : "lighter";
     for (const e of edges.values()) {
       const a = nodes.get(e.src), b = nodes.get(e.dst);
       if (!a || !b) continue;
+      if (a.filtered || b.filtered) { e.intensity = 0; continue; }   // hidden with its node
       const target = targetIntensity(e);
       e.intensity += (target - e.intensity) * 0.08;
       const color = colors["edge_" + e.kind] || colors.accent;
@@ -1167,9 +1449,7 @@
     ctx.globalCompositeOperation = "source-over";
     drawBeams(now);
 
-    const agents = [...nodes.values()].filter(n => isAgent(n) && !n.gone);
-    const crowded = agents.length > MAX_LABELS;
-    const drawNodes = [...nodes.values()].filter(n => !n.gone && !n.foldHidden).sort((a, b) => a.depth - b.depth);
+    const drawNodes = [...nodes.values()].filter(n => onPlane(n) && !n.foldHidden).sort((a, b) => a.depth - b.depth);
     for (const n of drawNodes) {
       const life = Math.min(1, (now - n.born) / 600);
       if (life <= 0) continue;
@@ -1210,7 +1490,7 @@
       }
       if (agent) drawAgentLogo(ctx, n.sx, n.sy, Math.max(8, Math.min(16, radius * 1.42)), agentBrand(n), true);
       if (n.cloud || n.environment === "cloud") drawCloudIcon(n.sx + radius * 0.78, n.sy - radius * 0.82, 13, outline);
-      if (agent && n !== hover && (!crowded || (n.tier !== null && n.tier <= 1))) {
+      if (agent && n !== hover && labelKeys.has(n.id)) {
         ctx.font = n.kind === "subagent" ? "10px system-ui, sans-serif" : "11px system-ui, sans-serif";
         ctx.textAlign = "center"; ctx.fillStyle = colors.muted;
         ctx.fillText(String(n.name || n.label || "").slice(0, 4), n.sx, n.sy + radius + 13);   // full name on hover
@@ -1220,6 +1500,25 @@
     ctx.textAlign = "start";
     drawJevCues(now);
     if (hover) drawLabel(hover);
+  }
+
+  // The names drawn this frame, at most MAX_LABELS: agents first (lead tiers first), then the groups in use, then the
+  // biggest groups (filters.js pickLabels). Hovering a node or a group still names it.
+  function frameLabels() {
+    const items = [], groups = new Map();
+    for (const n of nodes.values()) {
+      if (!onPlane(n) || n.foldHidden) continue;
+      if (isAgent(n)) { items.push({ key: n.id, agent: true, tier: n.tier }); continue; }
+      if (!n.surfaceCluster) continue;
+      const group = groups.get(n.surfaceCluster) || { key: "cluster:" + n.surfaceCluster, active: false, weight: 0 };
+      group.weight = n.surfaceClusterSize || 1;
+      group.active = group.active || !!n.recent;
+      groups.set(n.surfaceCluster, group);
+    }
+    for (const group of groups.values()) if (group.weight >= 2) items.push(group);
+    if (F) return F.pickLabels(items, MAX_LABELS);
+    const agentCount = items.filter(it => it.agent).length;   // without filters.js: the old rule
+    return new Set(items.filter(it => !it.agent || agentCount <= MAX_LABELS || (it.tier !== null && it.tier <= 1)).map(it => it.key));
   }
 
   function radiusOf(n) {
@@ -1268,6 +1567,7 @@
   function loop(now) {
     requestAnimationFrame(loop);
     if (!active) return;
+    syncJevKeep(now);
     step(now);
     draw(now);
     updateJevLine(now);
@@ -1348,7 +1648,7 @@
   });
 
   function centerNode(node) {
-    if (!node || node.gone) return;
+    if (!onPlane(node)) return;
     cameraTargetId = node.id;
     view.x = 0;
     view.y = 0;
@@ -1838,6 +2138,7 @@
     // Run the simulation by hand (a hidden tab gets no animation frames), then draw once.
     _settle(frames) {
       let now = performance.now();
+      syncJevKeep(now);
       for (let i = 0; i < frames; i++) step(now += 16);
       draw(now);
       updateJevLine(now);
@@ -1873,6 +2174,7 @@
       jevLineEl.setAttribute("role", "status");
       jevLineEl.hidden = true;        // shown while a Jev cue is
       wrap.append(jevLineEl);
+      initFilterBar();
       readColors();
       resize();
       window.addEventListener("resize", resize);

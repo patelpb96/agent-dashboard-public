@@ -24,6 +24,29 @@ background job.
 - **Jev circuit.** When an agent asks [Jev](#jev-circuit) for a decision, a packet runs from the agent to
   the Jev node and back, the node scans while Jev decides, and a marker at the agent says what came back.
 
+## Filters and layouts
+
+A bar above the graph decides what it shows. Your choices are kept in this browser (`localStorage`).
+
+- **Agents.** One chip per runtime on the graph: Claude, GPT (Codex and OpenAI), Pi and Google
+  (Antigravity), each with its count. Click a chip to hide or show that runtime's agents. The **Model**
+  menu lists the models in use, grouped by runtime with counts, so you can hide one model. A hidden agent
+  takes its lines with it, and a tool or file that only hidden agents used goes too.
+- **Tools & files.** **All** shows everything the shown agents used. **Active** keeps only what is in use
+  now: a call in flight, or one made in the last 2 minutes (the server's own activity window, sent as
+  `activeWindow` in `/api/graph`). **None** shows agents only; the Jev node stays while a Jev call is on
+  screen, so the [Jev circuit](#jev-circuit) still reads.
+- **Layout.** **Sphere** is the three nested spheres. **Cube** puts the same three strata on nested
+  cubes: agents on the inner cube (each runtime keeps its own patch), tools and files on the middle one,
+  every `.md` on the outer one. Nodes keep their direction from the centre and move out to the cube's
+  surface. The cubes are wireframes, always visible in Cube mode; the **Outline** knob makes them brighter.
+- **Showing N of M** counts the nodes on the graph, and **Reset filters** brings back everything as spheres.
+
+After a change the layout runs again over the nodes left, so they spread out instead of leaving gaps.
+Hovering, selecting, Center, folding and the side windows work the same; a selected node that gets
+hidden is deselected. At most 40 names are drawn at once, agents first, then groups in use, then the
+biggest groups; hovering a node or a group always names it.
+
 ## Requirements
 
 - Python 3.10 or newer
@@ -203,9 +226,10 @@ Members then install it with the `git clone` command above, and update with `git
 | `paths.py` | Every folder the dashboard reads, plus the environment overrides |
 | `index.html`, `plane.js` | The page and the 3D view |
 | `jev.js` | The Jev circuit's cue rules (pure; tested with `node --test`) |
+| `filters.js` | The filter bar's rules and the cube projection (pure; tested with `node --test`) |
 | `newsroom.py` | Demo workload |
 | `test_*.py` | Unit tests (`python -m unittest discover -p "test_*.py"`) |
-| `jev.test.js` | Tests for `jev.js` (`node --test`, Node 18 or newer) |
+| `jev.test.js`, `filters.test.js` | Tests for `jev.js` and `filters.js` (`node --test`, Node 18 or newer) |
 
 ## License
 

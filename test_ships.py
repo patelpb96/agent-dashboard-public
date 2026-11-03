@@ -109,6 +109,7 @@ class ShipEvents(unittest.TestCase):
                 mock.patch.object(server, "open_session_ids", return_value=set()):
             payload = server.graph_payload()
         self.assertEqual(payload["ships"], ships)
+        self.assertEqual(payload["activeWindow"], graph.ACTIVE_S)   # the page's "Active" filter uses the server's window
 
 
 if __name__ == "__main__":

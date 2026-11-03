@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import runstate
 import waits
-from graph import GraphStore
+from graph import ACTIVE_S, GraphStore
 from metrics import Metrics
 from paths import CLAUDE_DIR, PROJECTS_DIR, SHARED_DIR
 
@@ -37,7 +37,8 @@ GRAPH = GraphStore()
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 JSON = "application/json; charset=utf-8"
 STATIC = {"/space.jpg": ("space.jpg", "image/jpeg"), "/plane.js": ("plane.js", "application/javascript; charset=utf-8"),
-          "/jev.js": ("jev.js", "application/javascript; charset=utf-8")}
+          "/jev.js": ("jev.js", "application/javascript; charset=utf-8"),
+          "/filters.js": ("filters.js", "application/javascript; charset=utf-8")}
 
 
 def read_json(path):
@@ -294,8 +295,9 @@ def graph_payload():
     mark_open(nodes, open_session_ids(), time.time())
     # ships: newest commits, pushes and PRs; the page beams on new ones and lists them
     # jevs: newest Jev calls (lifecycle and bounded outcome); the page animates new ones
+    # activeWindow: how recent a call must be to count as in use (the page's "Active" tools and files)
     return {"generatedAt": snap["generatedAt"], "nodes": nodes, "edges": snap["edges"],
-            "ships": snap.get("ships", []), "jevs": snap.get("jevs", [])}
+            "ships": snap.get("ships", []), "jevs": snap.get("jevs", []), "activeWindow": ACTIVE_S}
 
 
 def waits_payload():

@@ -75,6 +75,7 @@
   :root[data-theme="8bit"] header,
   :root[data-theme="8bit"] .tile,
   :root[data-theme="8bit"] #plane-wrap,
+  :root[data-theme="8bit"] #plane-filters,
   :root[data-theme="8bit"] .drawer,
   :root[data-theme="8bit"] #flow-panel,
   :root[data-theme="8bit"] #waits-panel,
@@ -126,7 +127,7 @@
     --page-bg: #191919;
     --agent-fill: #000000; --agent-ring: 0.5;
   }
-  :root:is([data-theme="paper"], [data-theme="ink"]) :is(.tile, #plane-wrap, .drawer, #flow-panel, #waits-panel, #closed-panel, #ships-panel, .mini) {
+  :root:is([data-theme="paper"], [data-theme="ink"]) :is(.tile, #plane-wrap, #plane-filters, .drawer, #flow-panel, #waits-panel, #closed-panel, #ships-panel, .mini) {
     border: 1px solid var(--rule); border-radius: 0; backdrop-filter: none; box-shadow: var(--hard-shadow);
   }
   :root:is([data-theme="paper"], [data-theme="ink"]) header { border-bottom: 1px solid var(--rule); backdrop-filter: none; }
@@ -137,7 +138,7 @@
   :root:is([data-theme="paper"], [data-theme="ink"])[data-type="serif"] {
     --font: "Source Serif 4", Charter, "Iowan Old Style", "Palatino Linotype", Georgia, serif;
   }
-  :root:is([data-theme="paper"], [data-theme="ink"]) :is(.themes, .typeface) button[aria-pressed="true"] {
+  :root:is([data-theme="paper"], [data-theme="ink"]) :is(.themes, .typeface, .pf-seg) button[aria-pressed="true"] {
     background: var(--chosen-bg); color: var(--chosen-ink); border-color: var(--chosen-bg);
   }
   /* ---- Scrollbars, per theme. Chromium uses the ::-webkit rules (so thumbs can be gradients); Firefox gets the
@@ -251,7 +252,7 @@
   .mini .screen { height: 380px; overflow: auto; padding: 4px; }
   /* The 3D workflow view is the only active layout. */
   .right { display: flex; gap: 8px; align-items: center; justify-self: end; }
-  #plane-wrap { position: relative; margin: 12px; height: calc(100vh - 250px); min-height: 420px; background: var(--panel);
+  #plane-wrap { position: relative; margin: 8px 12px 12px; height: calc(100vh - 292px); min-height: 420px; background: var(--panel);
                 border: 1px solid var(--line); backdrop-filter: blur(6px); overflow: hidden; }
   #plane { width: 100%; height: 100%; display: block; touch-action: none; }
   #plane-hint { position: absolute; left: 12px; bottom: 10px; color: var(--muted); font-size: 13px; pointer-events: none; }
@@ -262,6 +263,42 @@
                                   color: var(--muted); background: var(--drawer); font-size: 13px; white-space: nowrap; }
   #camera-controls .outline-knob input { width: 84px; accent-color: var(--accent); }
   #camera-controls .outline-knob output { min-width: 3.2ch; text-align: right; color: var(--ink); }
+  /* Filter bar over the plane: agents by runtime and model, tools and files All / Active / None, Sphere / Cube.
+     Square corners and theme colours throughout; it wraps onto more lines in a narrow window. */
+  #plane-filters { position: relative; z-index: 6; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px;
+                   margin: 12px 12px 0; padding: 6px 10px; background: var(--panel); border: 1px solid var(--line);
+                   backdrop-filter: blur(6px); font-size: 13px; }
+  #plane-filters[hidden] { display: none; }
+  #plane-filters button, #plane-filters summary { border-radius: 0; font-size: 13px; padding: 2px 8px; }
+  #plane-filters button:disabled { opacity: .5; cursor: default; border-color: var(--line); }
+  #plane-filters :is(button, summary):focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .pf-group { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; min-width: 0; }
+  .pf-k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; margin-right: 2px; }
+  .pf-chip { display: inline-flex; align-items: center; gap: 5px; }
+  .pf-swatch { width: 9px; height: 9px; flex: none; background: var(--pf-color); border: 1px solid var(--pf-color); }
+  .pf-chip[aria-pressed="false"] { color: var(--muted); border-style: dashed; }
+  .pf-chip[aria-pressed="false"] .pf-swatch { background: transparent; }
+  .pf-n { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .pf-seg { display: inline-flex; border: 1px solid var(--line); }
+  #plane-filters .pf-seg button { border: none; }
+  .pf-seg button[aria-pressed="true"] { background: var(--chip); color: var(--ink); box-shadow: var(--glow-soft); }
+  :root[data-theme="8bit"] .pf-seg button[aria-pressed="true"] { outline: 1px solid var(--accent); outline-offset: -3px; }
+  .pf-models { position: relative; }
+  .pf-models summary { list-style: none; cursor: pointer; border: 1px solid var(--line); white-space: nowrap; }
+  .pf-models summary::-webkit-details-marker { display: none; }
+  .pf-models summary::after { content: " \25BE"; color: var(--muted); }
+  .pf-models[open] summary { border-color: var(--accent); }
+  .pf-menu { position: absolute; left: 0; top: calc(100% + 4px); width: max-content; min-width: 220px;
+             max-width: min(340px, calc(100vw - 40px)); max-height: 50vh; overflow-y: auto; padding: 8px 10px;
+             background: var(--drawer); border: 1px solid var(--line); box-shadow: 0 8px 24px rgba(0, 0, 0, .4); }
+  .pf-model-group { border: none; margin: 0 0 6px; padding: 0; min-width: 0; }
+  .pf-model-group legend { padding: 0; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .pf-model-group:disabled { opacity: .55; }
+  .pf-model { display: flex; align-items: center; gap: 6px; padding: 2px 0; cursor: pointer; }
+  .pf-model input { accent-color: var(--accent); margin: 0; border-radius: 0; }
+  .pf-model-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pf-count { color: var(--muted); font-variant-numeric: tabular-nums; margin-left: auto; white-space: nowrap; }
+  .pf-empty { color: var(--muted); }
   /* Flow view: the calls along one clicked line, newest first */
   #flow-panel { position: absolute; top: 52px; right: 0; bottom: 0; width: min(380px, 100%); overflow-y: auto;
                 background: var(--drawer); border-left: 1px solid var(--line); padding: 14px; font-size: 14px; }
@@ -357,7 +394,9 @@
   #plane-wrap:has(#jev-line:not([hidden])) #plane-hint { visibility: hidden; }   /* the line takes the hint's place */
   /* Narrow screens: the flow window becomes a bottom sheet and the hint moves away */
   @media (max-width: 720px) {
-    #plane-wrap { height: calc(100vh - 170px); min-height: 360px; }
+    #plane-wrap { height: calc(100vh - 250px); min-height: 360px; }
+    #plane-filters { gap: 6px 10px; }
+    .pf-count { margin-left: 0; }
     #flow-panel { left: 0; top: auto; height: 62%; width: auto; border-left: none; border-top: 1px solid var(--line); }
     #waits-panel { max-height: 30%; width: calc(100% - 20px); }
     #closed-panel { bottom: 10px; max-height: 25%; }
@@ -367,7 +406,7 @@
     #flow-panel:not([hidden]) ~ #ships-panel { display: none; }
     #plane-hint { display: none; }
   }
-  body.watch header, body.watch .stats, body.watch #plane-wrap, body.watch .banner { display: none; }
+  body.watch header, body.watch .stats, body.watch #plane-filters, body.watch #plane-wrap, body.watch .banner { display: none; }
   body.watch .mini { position: static; width: 100%; height: 100vh; display: block; border: none; }
   body.watch .mini .screen { height: calc(100vh - 60px); }
 </style>
@@ -393,7 +432,14 @@
 </header>
 <div class="banner" id="banner"></div>
 <section class="stats" id="stats"></section>
-<section id="plane-wrap"><canvas id="plane" aria-label="Three-dimensional agent workflow field"></canvas><div id="camera-controls" role="group" aria-label="Camera orientation"><button type="button" data-camera-view="zenith" title="View from above">Zenith</button><button type="button" data-camera-view="nadir" title="View from below">Nadir</button><button type="button" data-camera-view="center" title="Center camera on the selected element" disabled>Center</button><button type="button" data-camera-view="reset" title="Reset camera">Reset</button><label class="outline-knob" title="Opacity of the sphere outlines">Outline <input type="range" id="outline-opacity" min="0" max="100" step="1" value="1" aria-label="Sphere outline opacity, percent"><output for="outline-opacity">1%</output></label></div><div id="plane-hint">each runtime has a domain · shared tools and files sit between domains that use them · cloud marks hosted work · drag to rotate · shift-drag to pan · ctrl-click agents or resources to compare · scroll to zoom · Center to orbit the selected node · double-click empty space to deselect</div></section>
+<div id="plane-filters" role="group" aria-label="Plane filters">
+  <div class="pf-group"><span class="pf-k" id="pf-agents-k">Agents</span><span class="pf-group" id="pf-runtimes" role="group" aria-labelledby="pf-agents-k"></span><details class="pf-models" id="pf-models"><summary>Model</summary><div class="pf-menu" id="pf-model-menu"></div></details></div>
+  <div class="pf-group"><span class="pf-k" id="pf-res-k">Tools &amp; files</span><div class="pf-seg" role="group" aria-labelledby="pf-res-k"><button type="button" data-pf-resources="all" aria-pressed="true" title="Every tool and file a shown agent used">All</button><button type="button" data-pf-resources="active" aria-pressed="false" title="Only tools and files in use now or in the last 2 min">Active</button><button type="button" data-pf-resources="none" aria-pressed="false" title="Agents only">None</button></div></div>
+  <div class="pf-group"><span class="pf-k" id="pf-layout-k">Layout</span><div class="pf-seg" role="group" aria-labelledby="pf-layout-k"><button type="button" data-pf-layout="sphere" aria-pressed="true" title="Agents, tools and files on three nested spheres">Sphere</button><button type="button" data-pf-layout="cube" aria-pressed="false" title="The same three strata on nested cubes">Cube</button></div></div>
+  <span class="pf-count" id="pf-count"></span>
+  <button type="button" id="pf-reset" title="Show every agent, tool and file, laid out as spheres" disabled>Reset filters</button>
+</div>
+<section id="plane-wrap"><canvas id="plane" aria-label="Three-dimensional agent workflow field"></canvas><div id="camera-controls" role="group" aria-label="Camera orientation"><button type="button" data-camera-view="zenith" title="View from above">Zenith</button><button type="button" data-camera-view="nadir" title="View from below">Nadir</button><button type="button" data-camera-view="center" title="Center camera on the selected element" disabled>Center</button><button type="button" data-camera-view="reset" title="Reset camera">Reset</button><label class="outline-knob" title="Opacity of the sphere and cube outlines">Outline <input type="range" id="outline-opacity" min="0" max="100" step="1" value="1" aria-label="Sphere and cube outline opacity, percent"><output for="outline-opacity">1%</output></label></div><div id="plane-hint">each runtime has a domain · shared tools and files sit between domains that use them · cloud marks hosted work · drag to rotate · shift-drag to pan · ctrl-click agents or resources to compare · scroll to zoom · Center to orbit the selected node · double-click empty space to deselect</div></section>
 
 <div class="drawer-bg" id="drawer-bg">
   <aside class="drawer" id="drawer" role="dialog" aria-modal="true"></aside>
@@ -413,6 +459,7 @@
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js" integrity="sha384-+VfUPEb0PdtChMwmBcBmykRMDd+v6D/oFmB3rZM/puCMDYcIvF968OimRh4KQY9a" crossorigin="anonymous"></script>
 <script src="jev.js"></script>
+<script src="filters.js"></script>
 <script src="plane.js"></script>
 <script>
 const POLL_MS = 3000;
