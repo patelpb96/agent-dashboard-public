@@ -36,7 +36,8 @@ METRICS = Metrics()
 GRAPH = GraphStore()
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 JSON = "application/json; charset=utf-8"
-STATIC = {"/space.jpg": ("space.jpg", "image/jpeg"), "/plane.js": ("plane.js", "application/javascript; charset=utf-8")}
+STATIC = {"/space.jpg": ("space.jpg", "image/jpeg"), "/plane.js": ("plane.js", "application/javascript; charset=utf-8"),
+          "/jev.js": ("jev.js", "application/javascript; charset=utf-8")}
 
 
 def read_json(path):
@@ -292,8 +293,9 @@ def graph_payload():
             node["label"] = node["name"]
     mark_open(nodes, open_session_ids(), time.time())
     # ships: newest commits, pushes and PRs; the page beams on new ones and lists them
+    # jevs: newest Jev calls (lifecycle and bounded outcome); the page animates new ones
     return {"generatedAt": snap["generatedAt"], "nodes": nodes, "edges": snap["edges"],
-            "ships": snap.get("ships", [])}
+            "ships": snap.get("ships", []), "jevs": snap.get("jevs", [])}
 
 
 def waits_payload():

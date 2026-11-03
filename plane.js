@@ -24,6 +24,8 @@
   const BEAM_STILL_MS = 500;     // with reduced motion it just stands at full length this long
   // The only ship text that may become a link: a GitHub pull request URL (the server checks the same).
   const PR_URL = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)$/;
+  const JEV_NODE = "mcp:jev:jev_decide";   // the one node Jev calls land on (graph.py target_of)
+  const J = window.JevCircuit || null;      // jev.js: the cue rules; without it the plane simply shows no Jev cues
   const isAgent = n => n.kind === "agent" || n.kind === "subagent";
   const STATE_COLOR = { blocked: "--blocked", working: "--working", idle: "--idle", done: "--done", other: "--other" };
   const DOMAIN_COLORS = { claude: "#e9a960", claude_code: "#e9a960", "claude-code": "#e9a960",
@@ -79,6 +81,8 @@
   let agentNames = new Map(); // every agent the server knows, closed ones too, for the Ships list
   let shipsOpen = false;
   try { shipsOpen = localStorage.getItem(SHIPS_KEY) === "1"; } catch (e) { /* storage blocked */ }
+  let jevState = J ? J.emptyJev() : null;   // Jev calls seen and the cues showing (jev.js)
+  let jevLineEl = null, jevLineText = "";
 
   const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
@@ -91,6 +95,9 @@
     colors.agentRing = parseFloat(css("--agent-ring")) || 1.5;
     for (const k of Object.keys(EDGE_COLOR)) colors["edge_" + k] = css(EDGE_COLOR[k]);
     for (const k of Object.keys(STATE_COLOR)) colors["state_" + k] = css(STATE_COLOR[k]);
+    colors.jev = css("--jev") || "#22d3ee";
+    colors.jevAmber = css("--jev-amber") || "#f59e0b";
+    colors.jevRed = css("--jev-red") || "#f87171";
   }
 
   function nodeColor(n) {
@@ -540,7 +547,10 @@
     simAlpha = Math.max(simAlpha, 0.6);  // new data reheats the layout a little
     agentNames = new Map(raw.nodes.filter(isAgent).map(n => [n.id, n.name || n.label || n.id]));
     // A server that has not read its transcripts yet sends no generatedAt; wait for it before priming.
-    if (raw.generatedAt) takeShips(Array.isArray(raw.ships) ? raw.ships : [], raw.generatedAt);
+    if (raw.generatedAt) {
+      takeShips(Array.isArray(raw.ships) ? raw.ships : [], raw.generatedAt);
+      takeJevs(Array.isArray(raw.jevs) ? raw.jevs : [], raw.generatedAt);
+    }
   }
 
   // ---- Ship events: a successful push or PR sends a beam of light out of the agent and its repo folder.
@@ -618,6 +628,110 @@
       ctx.stroke();
     }
     ctx.restore();
+  }
+
+  // ---- Jev calls: a packet runs from the agent to the Jev node and back along the straight line between their
+  // projected positions (recomputed every frame, so it follows the rotating camera). jev.js decides the stages.
+  function takeJevs(list, serverNow) {
+    if (J) jevState = J.observeJev(jevState, list, serverNow, performance.now());
+  }
+
+  function drawJevNode(n, radius, ring, ringWidth) {
+    const r = radius + 1, g = Math.max(2, r * 0.36), o = r + 3;
+    ctx.lineCap = "butt"; ctx.lineJoin = "miter";
+    ctx.fillStyle = colors.bg || "#000";
+    ctx.fillRect(n.sx - r, n.sy - r, r * 2, r * 2);
+    ctx.strokeStyle = ring || colors.jev;
+    ctx.lineWidth = ringWidth;
+    ctx.strokeRect(n.sx - r, n.sy - r, r * 2, r * 2);
+    ctx.strokeStyle = colors.jev;   // the lens: a cross-hair with a small square at its centre
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(n.sx - o, n.sy); ctx.lineTo(n.sx - g, n.sy); ctx.moveTo(n.sx + g, n.sy); ctx.lineTo(n.sx + o, n.sy);
+    ctx.moveTo(n.sx, n.sy - o); ctx.lineTo(n.sx, n.sy - g); ctx.moveTo(n.sx, n.sy + g); ctx.lineTo(n.sx, n.sy + o);
+    ctx.stroke();
+    ctx.fillStyle = colors.jev;
+    ctx.fillRect(n.sx - g / 2, n.sy - g / 2, g, g);
+  }
+
+  // The outcome marker at the agent's top-right corner. Squares, diamonds and a cross, never rounded.
+  function drawJevMarker(agent, outcome, alpha) {
+    const r = agent.drawR || 8, s = 8, x = agent.sx + r + 4, y = agent.sy - r - 4;
+    const diamond = () => {
+      ctx.beginPath();
+      ctx.moveTo(x, y - s * 0.7); ctx.lineTo(x + s * 0.7, y); ctx.lineTo(x, y + s * 0.7); ctx.lineTo(x - s * 0.7, y);
+      ctx.closePath();
+    };
+    ctx.globalAlpha = alpha;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash(outcome === "unknown" ? [2, 2] : []);
+    if (outcome === "applied") { ctx.fillStyle = colors.jev; ctx.fillRect(x - s / 2, y - s / 2, s, s); }
+    else if (outcome === "partial") { ctx.strokeStyle = colors.jevAmber; diamond(); ctx.stroke(); }
+    else if (outcome === "fallback") { ctx.fillStyle = colors.jevAmber; diamond(); ctx.fill(); }
+    else if (outcome === "failed") {
+      ctx.strokeStyle = colors.jevRed; ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(x - s / 2, y - s / 2); ctx.lineTo(x + s / 2, y + s / 2); ctx.moveTo(x + s / 2, y - s / 2); ctx.lineTo(x - s / 2, y + s / 2);
+      ctx.stroke();
+    } else {   // answered and done: the text colour; missing and unknown: grey (unknown dashed)
+      ctx.strokeStyle = outcome === "missing" || outcome === "unknown" ? colors.muted : colors.ink;
+      ctx.strokeRect(x - s / 2, y - s / 2, s, s);
+    }
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+  }
+
+  function drawJevCues(now) {
+    if (!jevState || !jevState.cues.length) return;   // nothing showing: no work this frame
+    const node = nodes.get(JEV_NODE);
+    const lens = node && !node.gone && !node.foldHidden && Number.isFinite(node.sx) ? node : null;
+    ctx.save();
+    ctx.globalCompositeOperation = "source-over";
+    ctx.lineCap = "butt"; ctx.lineJoin = "miter";
+    for (const c of jevState.cues) {
+      const agent = nodes.get(c.source);
+      if (!agent || agent.gone || agent.foldHidden || !isAgent(agent) || !Number.isFinite(agent.sx)) continue;
+      const f = J.frameAt(c, now, REDUCED);
+      if (f.stage === "gone") continue;
+      if (f.stage === "mark") { drawJevMarker(agent, f.outcome, REDUCED ? 1 : 1 - 0.6 * f.t); continue; }
+      if (!lens) continue;
+      const lr = (lens.drawR || 7) + 1;
+      if (f.stage === "pending") {   // reduced motion: a still, dashed frame held around the Jev node
+        ctx.strokeStyle = colors.jev; ctx.lineWidth = 1.5; ctx.setLineDash([3, 2]);
+        ctx.strokeRect(lens.sx - lr - 4, lens.sy - lr - 4, (lr + 4) * 2, (lr + 4) * 2);
+        ctx.setLineDash([]);
+        continue;
+      }
+      const dx = lens.sx - agent.sx, dy = lens.sy - agent.sy, d = Math.hypot(dx, dy) || 1;
+      ctx.strokeStyle = withAlpha(colors.jev, 0.55); ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.moveTo(agent.sx, agent.sy); ctx.lineTo(lens.sx, lens.sy); ctx.stroke();
+      const reach = Math.max(0, 1 - (lr + 4) / d);   // the packet rests at the lens's edge
+      const t = (f.stage === "out" ? f.t : f.stage === "back" ? 1 - f.t : 1) * reach;
+      ctx.fillStyle = colors.jev;
+      ctx.fillRect(agent.sx + dx * t - 3, agent.sy + dy * t - 3, 6, 6);
+      if (f.stage === "scan") {   // a line sweeps down the lens while Jev decides
+        const y = lens.sy - lr + 2 * lr * f.t;
+        ctx.fillStyle = withAlpha(colors.jev, 0.18);
+        ctx.fillRect(lens.sx - lr, lens.sy - lr, lr * 2, y - (lens.sy - lr));
+        ctx.strokeStyle = colors.jev; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(lens.sx - lr - 3, y); ctx.lineTo(lens.sx + lr + 3, y); ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  // The words for the cues showing (role=status), so the meaning never depends on the motion.
+  function updateJevLine(now) {
+    if (!jevState || !jevLineEl) return;
+    jevState = J.pruneJev(jevState, now);
+    const text = jevState.cues.length ? J.jevLine(jevState, now, id => {
+      const n = nodes.get(id);
+      return n && !n.gone && isAgent(n) ? truncate(n.name || n.label || id, 40) : null;
+    }) : "";
+    if (text === jevLineText) return;
+    jevLineText = text;
+    jevLineEl.textContent = text;
+    jevLineEl.hidden = !text;
   }
 
   // Agents slide over the inner agent shell. Resources form surface clusters by folder or
@@ -1063,6 +1177,14 @@
       const radius = (radiusOf(n) + (n.foldCount ? 4 : 0)) * Math.max(0.72, Math.min(1.3, n.projectScale || 1));
       const color = nodeColor(n), outline = agent ? domainColor(domainOf(n)) : colors.line;
       const selected = selectedItems.has(n.id) || selectedAgent === n.id;
+      n.drawR = radius;
+      if (n.id === JEV_NODE) {   // Jev: a square cyan lens with a cross-hair, at full strength
+        ctx.globalAlpha = life;
+        ctx.globalCompositeOperation = "source-over";
+        drawJevNode(n, radius, n === hover ? colors.ink : selected ? colors.accent : null, n === hover || selected ? 2.5 : 1.5);
+        ctx.globalAlpha = 1;
+        continue;
+      }
       ctx.globalAlpha = life * (agent ? 1 : colors.crisp ? 0.75 : 0.4);
       if (agent && !colors.crisp) {
         ctx.globalCompositeOperation = "lighter";
@@ -1096,10 +1218,12 @@
       ctx.globalAlpha = 1;
     }
     ctx.textAlign = "start";
+    drawJevCues(now);
     if (hover) drawLabel(hover);
   }
 
   function radiusOf(n) {
+    if (n.id === JEV_NODE) return 7;
     const base = KIND_RADIUS[n.kind] || 5;
     return isAgent(n) && n.tier !== null ? base + (n.tier === 0 ? 3 : n.tier === 1 ? 1.5 : 0) : base;
   }
@@ -1146,6 +1270,7 @@
     if (!active) return;
     step(now);
     draw(now);
+    updateJevLine(now);
   }
 
   // ---- Pointer: drag through both poles to rotate, shift-drag to pan, wheel to zoom.
@@ -1715,6 +1840,7 @@
       let now = performance.now();
       for (let i = 0; i < frames; i++) step(now += 16);
       draw(now);
+      updateJevLine(now);
     },
     _labels() { return clusterLabels.map(l => ({ ...l })); },
     init(options) {
@@ -1742,6 +1868,11 @@
       shipsPanel.win.id = "ships-panel";
       shipsPanel.win.hidden = true;   // shown once there is a ship to list
       wrap.append(shipsPanel.win);
+      jevLineEl = el("div", "");
+      jevLineEl.id = "jev-line";
+      jevLineEl.setAttribute("role", "status");
+      jevLineEl.hidden = true;        // shown while a Jev cue is
+      wrap.append(jevLineEl);
       readColors();
       resize();
       window.addEventListener("resize", resize);

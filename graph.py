@@ -24,7 +24,9 @@ agents mark the shared files and tools they use as cloud resources in the graph.
 Only transcripts changed in the last GRAPH_WINDOW_S are read, and each file is
 re-parsed only when its (mtime, size) changes, like metrics.py.
 """
+import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -617,6 +619,226 @@ def ship_target(folder, doc_groups):
     return min(under, key=lambda g: (-doc_groups[g], len(g), g)) if under else None
 
 
+# ---- Jev calls: `jev_decide` on the `jev` MCP server, so the plane can show an agent tapping into Jev and back.
+# Exact name only, never "anything containing jev". Claude Code and Pi write MCP tools as `mcp__<server>__<tool>`;
+# Codex writes a namespaced function_call that codex_tool_name joins into the same name.
+#
+# A Jev result is the one tool result read beyond shell output (approved by Preet 2026-11-02, exactly this list):
+# only for a result matched to a Jev call id still waiting, only when its text is at most JEV_RESULT_MAX bytes of
+# JSON, and only `ok`, `failOpen`, `latencyMs`, `policy`, `decision.applied`, `decision.reason`, `error.reason` and
+# at most JEV_AUDIT_ROWS rows of `applied`, `confidence` and `threshold` (or a yes/no decision's two thresholds) from
+# `decision.audit`. Strings go through allow-lists, numbers become whole per-mille or milliseconds. The request,
+# answers, probabilities, choice, value, ids, model, risks, redactions and every message are never kept.
+JEV_TOOL = "mcp__jev__jev_decide"
+JEV_PER_TRANSCRIPT = 32     # Jev calls remembered per transcript, newest last
+JEV_WAITING_MAX = 64        # Jev call ids waiting for their result, per transcript
+JEV_PER_AGENT = 8           # newest Jev calls sent per agent
+JEV_TOTAL = 40              # newest Jev calls sent in all
+JEV_RESULT_MAX = 64 * 1024  # a larger result text is not read (the call is done, its outcome unknown)
+JEV_AUDIT_ROWS = 8          # further audit rows are dropped uncounted
+JEV_LATENCY_MAX = 3_600_000
+JEV_POLICIES = ("none", "generic", "contextKeep", "routeModel", "safetyGate", "shouldContinue")
+JEV_REASONS = (
+    "all_applied", "all_fallback", "partial_fallback", "no_decisions", "kept_all", "dropped_unneeded_items",
+    "truncated_items", "high_confidence", "low_confidence", "middle_band", "unknown_option", "missing_answer",
+    "no_profiles", "above_threshold", "below_threshold", "pinned", "tool_pair", "destructive", "exfiltration",
+    "scope_drift", "reversible_low_risk", "not_reversible",
+)
+JEV_ERRORS = ("missing_key", "timeout", "transport_error", "http_error", "malformed_response", "state_too_large",
+              "invalid_request")
+
+
+def codex_tool_name(item):
+    """A Codex call's tool name: an MCP namespace (`mcp__<server>`) and its name joined as Claude and Pi spell it."""
+    name = item.get("name") or item.get("tool_name") or ""
+    namespace = item.get("namespace")
+    if (isinstance(name, str) and name and not name.startswith("mcp__") and isinstance(namespace, str)
+            and namespace.startswith("mcp__") and len(namespace) > len("mcp__")):
+        return f"{namespace}__{name}"
+    return name if isinstance(name, str) else ""
+
+
+def _jev_text(content):
+    """A result's text: a string, or the first text block of a content array."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                return block["text"]
+    return None
+
+
+def _jev_json(text):
+    if text is None or len(text) > JEV_RESULT_MAX or len(text.encode("utf-8", errors="replace")) > JEV_RESULT_MAX:
+        return None
+    try:
+        return json.loads(text)
+    except (ValueError, RecursionError):
+        return None
+
+
+def _flag(value):
+    return value if isinstance(value, bool) else None
+
+
+def _number(value, top):
+    """A finite number in 0..top, else None (out of range is dropped, not clamped). bool is not a number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value if 0 <= value <= top else None
+
+
+def _per_mille(value):
+    value = _number(value, 1)
+    return None if value is None else int(math.floor(value * 1000 + 0.5))
+
+
+def _allow(allowed, value):
+    return (value if value in allowed else "other") if isinstance(value, str) else None
+
+
+def jev_outcome(content):
+    """The bounded outcome of one Jev result (see the section note), or None when it can't be read."""
+    value = _jev_json(_jev_text(content))
+    if not (isinstance(value, dict) and "ok" in value):
+        # One level of an MCP wrapper: {"content":[{"type":"text","text":"..."}]}, or the bare content array.
+        inner = value if isinstance(value, list) else value.get("content") if isinstance(value, dict) else None
+        value = _jev_json(_jev_text(inner)) if isinstance(inner, list) else None
+        if not (isinstance(value, dict) and "ok" in value):
+            return None
+    decision = value.get("decision") if isinstance(value.get("decision"), dict) else {}
+    error = value.get("error") if isinstance(value.get("error"), dict) else {}
+    latency = _number(value.get("latencyMs"), JEV_LATENCY_MAX)
+    out = {"ok": _flag(value.get("ok")), "fail_open": _flag(value.get("failOpen")),
+           "latency_ms": None if latency is None else int(math.floor(latency + 0.5)),
+           "policy": _allow(JEV_POLICIES, value.get("policy")), "applied": _flag(decision.get("applied")),
+           "reason": _allow(JEV_REASONS, decision.get("reason")), "error": _allow(JEV_ERRORS, error.get("reason")),
+           "audit": []}
+    audit = decision.get("audit")
+
+    def row(applied, measure, value_pm=None, threshold_pm=None, yes_pm=None, no_pm=None):
+        return {"applied": applied, "measure": measure, "value_pm": value_pm, "threshold_pm": threshold_pm,
+                "yes_pm": yes_pm, "no_pm": no_pm}
+
+    if out["policy"] in ("generic", "contextKeep") and isinstance(audit, list):
+        # generic: one row per decision (a choice, or a yes/no "noul"); contextKeep: one per item, no applied flag
+        generic = out["policy"] == "generic"
+        for item in audit[:JEV_AUDIT_ROWS]:
+            item = item if isinstance(item, dict) else {}
+            if generic and item.get("kind") == "noul":
+                # Only the two thresholds: with them and `applied`, the probability would reveal the decision's value.
+                thresholds = item.get("thresholds") if isinstance(item.get("thresholds"), dict) else {}
+                out["audit"].append(row(_flag(item.get("applied")), "yes_no",
+                                        yes_pm=_per_mille(thresholds.get("yes")), no_pm=_per_mille(thresholds.get("no"))))
+            else:
+                out["audit"].append(row(_flag(item.get("applied")) if generic else None, "confidence",
+                                        _per_mille(item.get("confidence")), _per_mille(item.get("threshold"))))
+    elif out["policy"] in ("routeModel", "shouldContinue") and isinstance(audit, dict):
+        out["audit"].append(row(out["applied"], "confidence", _per_mille(audit.get("confidence")),
+                                _per_mille(audit.get("threshold"))))
+    # safetyGate's thresholds apply to its risks, which are not kept: no rows. `none` has no decision.
+    return out
+
+
+class JevLog:
+    """The Jev calls of one transcript, bounded, and the call ids still waiting for their result."""
+
+    def __init__(self):
+        self.calls = []         # {"call", "n", "phase", "at", "end", "outcome"}, oldest first
+        self.waiting = []       # call ids whose result may be read; cleared at every new user turn
+        self._seen = {}         # call id -> calls seen with it, so a reused id still gets its own stable id
+
+    def _push(self, call_id, phase, at, end):
+        n = self._seen.get(call_id, 0)
+        self._seen[call_id] = n + 1
+        self.calls.append({"call": call_id, "n": n, "phase": phase, "at": at, "end": end, "outcome": None})
+        del self.calls[:-JEV_PER_TRANSCRIPT]
+
+    def started(self, call_id, at):
+        call_id = str(call_id or "")
+        # A repeated start (a replayed line) is the same call: one still pending, or one with the same start time.
+        if any(c["call"] == call_id and (c["phase"] == "pending" or (call_id and c["at"] == at)) for c in self.calls):
+            return
+        self._push(call_id, "pending", at or None, None)
+        if call_id and call_id not in self.waiting:
+            self.waiting.append(call_id)
+            del self.waiting[:-JEV_WAITING_MAX]
+
+    def result(self, call_id, at, content, named=None):
+        """A tool result. `named` is the tool the result names itself (Pi does): that name decides whether it is
+        Jev's. Otherwise only a result for a waiting Jev call id counts. Returns True for a Jev result."""
+        call_id = str(call_id or "")
+        if named is not None and named != JEV_TOOL:
+            return False
+        waiting = bool(call_id) and call_id in self.waiting
+        if not waiting and named is None:
+            return False
+        if waiting:
+            self.waiting.remove(call_id)
+        call = next((c for c in reversed(self.calls) if c["call"] == call_id and c["phase"] == "pending"), None)
+        if call:
+            # The result's text is read only for a waiting id.
+            call.update(phase="done", end=at or None, outcome=jev_outcome(content) if waiting else None)
+            return True
+        if named is None:
+            return True
+        # A late or repeated result for a call already logged (done, or missing after a new turn) is not a new call.
+        if call_id and any(c["call"] == call_id for c in self.calls):
+            return True
+        # A result whose start was never seen (its line was dropped): finished, with no start time invented.
+        self._push(call_id, "done", None, at or None)
+        return True
+
+    def busy(self):
+        """A call is still pending (so a new user turn would change it)."""
+        return bool(self.waiting) or any(c["phase"] == "pending" for c in self.calls)
+
+    def turn_started(self, at):
+        """A new user turn: a call still pending won't get its result, and no waiting id may be read any more."""
+        for call in self.calls:
+            if call["phase"] == "pending":
+                call.update(phase="missing", end=at or None)
+        self.waiting.clear()
+
+    def view(self, agent):
+        """Payload rows for this transcript's calls (copies; the per-file cache stays as parsed)."""
+        out = []
+        for c in self.calls:
+            key = f"{agent}\0{c['call']}" + (f"\0{c['n']}" if c["n"] else "")
+            out.append({"id": hashlib.sha1(key.encode("utf-8")).hexdigest()[:12], "agent": agent,
+                        "at": c["at"], "end": c["end"], "phase": c["phase"],
+                        "outcome": {**c["outcome"], "audit": [dict(r) for r in c["outcome"]["audit"]]}
+                        if c["outcome"] else None})
+        return out
+
+
+def jev_rows(parsed_files, now, aliases=None):
+    """Newest Jev calls across transcripts, newest first: at most JEV_PER_AGENT per agent and JEV_TOTAL in all.
+    A call still pending in a transcript that went quiet past its active window is reported missing."""
+    aliases = aliases or {}
+    rows = []
+    for parsed in parsed_files:
+        quiet = now - (parsed.get("activity") or 0) > parsed.get("activeWindow", ACTIVE_S)
+        for row in parsed.get("jevs", []):
+            row = {**row, "agent": aliases.get(row["agent"], row["agent"])}
+            if quiet and row["phase"] == "pending":
+                row["phase"] = "missing"
+            rows.append(row)
+    rows.sort(key=lambda r: r["at"] if r["at"] is not None else r["end"] or 0, reverse=True)
+    per_agent, out = {}, []
+    for row in rows:
+        if per_agent.get(row["agent"], 0) >= JEV_PER_AGENT:
+            continue
+        per_agent[row["agent"]] = per_agent.get(row["agent"], 0) + 1
+        out.append(row)
+        if len(out) == JEV_TOTAL:
+            break
+    return out
+
+
 def subagent_label(path):
     """A subagent's description from its .meta.json, else its file name."""
     try:
@@ -624,6 +846,21 @@ def subagent_label(path):
     except (OSError, ValueError):
         return path.stem
     return data.get("description") or data.get("agentType") or path.stem
+
+
+def _claude_user_turn(entry):
+    """True for a line that starts a new user turn: text from the person (or a notification), not a tool result."""
+    message = entry.get("message")
+    if not isinstance(message, dict) or entry.get("isMeta"):
+        return False
+    if entry.get("type") != "user" and message.get("role") != "user":
+        return False
+    content = message.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    return (isinstance(content, list) and
+            any(isinstance(p, dict) and p.get("type") == "text" for p in content) and
+            not any(isinstance(p, dict) and p.get("type") == "tool_result" for p in content))
 
 
 def parse_file(path):
@@ -638,6 +875,7 @@ def parse_file(path):
     ships = []          # commits, pushes and PRs this agent ran, judged once their result is in
     pending_ships = {}  # tool_use id -> (steps, at) for a shell call that may ship, until its result
     cwd = None          # every Claude transcript line records the folder the agent was working in
+    jev = JevLog()
     try:
         with path.open(encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -647,13 +885,19 @@ def parse_file(path):
                             busy = False
                     except ValueError:
                         pass
-                if '"tool_use"' not in line and '"tool_result"' not in line:
+                # user lines matter only while a Jev call waits: a new turn means its result won't come
+                jev_turn = '"user"' in line and jev.busy()
+                if '"tool_use"' not in line and '"tool_result"' not in line and not jev_turn:
                     continue
                 try:
                     entry = json.loads(line)
                 except ValueError:
                     continue
+                if not isinstance(entry, dict):
+                    continue
                 at = _ts(entry.get("timestamp")) or 0.0
+                if jev_turn and _claude_user_turn(entry):
+                    jev.turn_started(at)
                 cwd = entry.get("cwd") or cwd
                 content = (entry.get("message") or {}).get("content")
                 if not isinstance(content, list):
@@ -674,8 +918,11 @@ def parse_file(path):
                             text = _result_text(part.get("content"))
                             ships.extend(ship_events(agent, part.get("tool_use_id"), pending[0], text, at or pending[1],
                                                      bool(part.get("is_error")) or _exit_failed(text)))
+                        jev.result(part.get("tool_use_id"), at, part.get("content"))
                     elif part.get("type") == "tool_use":
                         name, inp = part.get("name") or "", part.get("input")
+                        if name == JEV_TOOL:
+                            jev.started(part.get("id"), at)
                         t = target_of(name, inp)
                         path_target = path_target_from_input(inp)
                         targets = [t, shared_type_target(name), path_target,
@@ -717,7 +964,8 @@ def parse_file(path):
     except OSError:
         return None
     return {"agent": agent, "provider": provider, "nodes": nodes, "edges": edges, "open": open_calls,
-            "events": events[-EVENTS_PER_FILE:], "ships": ships[-SHIP_EVENTS_TOTAL:]}
+            "events": events[-EVENTS_PER_FILE:], "ships": ships[-SHIP_EVENTS_TOTAL:],
+            "jevs": jev.view(agent), "activity": mtime, "activeWindow": ACTIVE_S}
 
 
 def _codex_meta(path):
@@ -760,6 +1008,7 @@ def parse_codex_file(path, now=None):
     nodes, edges, open_calls, events = {}, {}, {}, []
     ships, pending_ships = [], {}
     ship_cwd = cwd          # turn_context moves this when the session changes folder; the node keeps its first cwd
+    jev = JevLog()
     latest_started = 0.0
     latest_finished = 0.0
     latest_activity = 0.0
@@ -852,6 +1101,7 @@ def parse_codex_file(path, now=None):
                     event_type = payload.get("type")
                     event_at = _ts(payload.get("started_at") if event_type == "task_started" else payload.get("completed_at")) or at
                     if event_type == "task_started":
+                        jev.turn_started(event_at)
                         if latest_started > latest_finished:
                             finish_calls(event_at)
                         latest_started = max(latest_started, event_at)
@@ -862,24 +1112,30 @@ def parse_codex_file(path, now=None):
                     item_type = payload.get("type")
                     if item_type in ("custom_tool_call", "function_call", "tool_use"):
                         args, raw_text = _codex_args(payload)
-                        add_call(payload.get("name") or payload.get("tool_name") or "",
-                                 args, raw_text, at, payload.get("call_id") or payload.get("id"))
+                        name, call_id = codex_tool_name(payload), payload.get("call_id") or payload.get("id")
+                        if name == JEV_TOOL:
+                            jev.started(call_id, at)
+                        add_call(name, args, raw_text, at, call_id)
                     elif item_type in ("custom_tool_call_output", "function_call_output", "tool_result"):
                         calls = open_calls.pop(payload.get("call_id") or payload.get("tool_call_id"), None) or []
                         for call in calls:
                             if call["at"] and at:
                                 call["ms"] = max(0, int((at - call["at"]) * 1000))
                         finish_ship(payload.get("call_id") or payload.get("tool_call_id"), payload.get("output"), at)
+                        jev.result(payload.get("call_id") or payload.get("tool_call_id"), at, payload.get("output"))
                 elif kind in ("custom_tool_call", "function_call", "tool_use"):
                     args, raw_text = _codex_args(entry)
-                    add_call(entry.get("name") or entry.get("tool_name") or "", args, raw_text,
-                             at, entry.get("call_id") or entry.get("id"))
+                    name, call_id = codex_tool_name(entry), entry.get("call_id") or entry.get("id")
+                    if name == JEV_TOOL:
+                        jev.started(call_id, at)
+                    add_call(name, args, raw_text, at, call_id)
                 elif kind in ("custom_tool_call_output", "function_call_output", "tool_result"):
                     calls = open_calls.pop(entry.get("call_id") or entry.get("tool_call_id"), None) or []
                     for call in calls:
                         if call["at"] and at:
                             call["ms"] = max(0, int((at - call["at"]) * 1000))
                     finish_ship(entry.get("call_id") or entry.get("tool_call_id"), entry.get("output"), at)
+                    jev.result(entry.get("call_id") or entry.get("tool_call_id"), at, entry.get("output"))
         mtime = path.stat().st_mtime
         latest_activity = max(latest_activity, mtime)
     except OSError:
@@ -893,7 +1149,8 @@ def parse_codex_file(path, now=None):
                     "space": "codex", "environment": _environment(meta), "state": "working" if active else "done", "model": model,
                     "cwd": cwd, "mtime": mtime, "open": active}
     return {"agent": agent, "provider": "codex", "nodes": nodes, "edges": edges,
-            "open": open_calls, "events": events[-EVENTS_PER_FILE:], "ships": ships[-SHIP_EVENTS_TOTAL:]}
+            "open": open_calls, "events": events[-EVENTS_PER_FILE:], "ships": ships[-SHIP_EVENTS_TOTAL:],
+            "jevs": jev.view(agent), "activity": latest_activity, "activeWindow": CODEX_ACTIVE_S}
 
 
 def _pi_meta(path):
@@ -926,6 +1183,7 @@ def parse_pi_file(path, now=None):
     nodes, edges, open_calls, events = {}, {}, {}, []
     ships, pending_ships = [], {}
     spawn_calls = {}
+    jev = JevLog()
     latest_activity = 0.0
     latest_role = None
     latest_stop = None
@@ -1023,7 +1281,9 @@ def parse_pi_file(path, now=None):
                     continue
                 role = message.get("role")
                 latest_role = role or latest_role
-                if role == "assistant":
+                if role == "user":
+                    jev.turn_started(at)
+                elif role == "assistant":
                     model = message.get("model") or model
                     latest_stop = message.get("stopReason") or latest_stop
                     content = message.get("content") or []
@@ -1034,6 +1294,8 @@ def parse_pi_file(path, now=None):
                             args = block.get("arguments") or block.get("args") or {}
                             if not isinstance(args, dict):
                                 args = {}
+                            if block.get("name") == JEV_TOOL:
+                                jev.started(block.get("id") or block.get("toolCallId"), at)
                             add_call(block.get("name") or "", args, at, block.get("id") or block.get("toolCallId"))
                 elif role == "toolResult":
                     finish_call(message.get("toolCallId"), at, message.get("durationMs"))
@@ -1042,6 +1304,9 @@ def parse_pi_file(path, now=None):
                         text = _result_text(message.get("content"))
                         ships.extend(ship_events(agent, message.get("toolCallId"), pending[0], text, at or pending[1],
                                                  bool(message.get("isError")) or _exit_failed(text)))
+                    named = message.get("toolName")   # Pi names the tool on its result: that name decides
+                    jev.result(message.get("toolCallId"), at, message.get("content"),
+                               named if isinstance(named, str) and named else None)
 
         mtime = path.stat().st_mtime
         latest_activity = max(latest_activity, mtime)
@@ -1070,7 +1335,8 @@ def parse_pi_file(path, now=None):
                     "environment": environment, "state": "working" if working else "idle" if active else "done",
                     "model": model, "cwd": cwd, "mtime": mtime, "open": active}
     return {"agent": agent, "provider": "pi", "nodes": nodes, "edges": edges,
-            "open": open_calls, "events": events[-EVENTS_PER_FILE:], "ships": ships[-SHIP_EVENTS_TOTAL:]}
+            "open": open_calls, "events": events[-EVENTS_PER_FILE:], "ships": ships[-SHIP_EVENTS_TOTAL:],
+            "jevs": jev.view(agent), "activity": latest_activity, "activeWindow": PI_ACTIVE_S}
 
 
 # ---- Antigravity: Google's agent CLI (Gemini models). One SQLite file per conversation in
@@ -1403,7 +1669,7 @@ class GraphStore:
     def __init__(self):
         self._files = {}   # path -> ((mtime, size), parsed)
         self._lock = threading.Lock()
-        self._snapshot = {"nodes": {}, "edges": [], "generatedAt": None, "ships": []}
+        self._snapshot = {"nodes": {}, "edges": [], "generatedAt": None, "ships": [], "jevs": []}
         self._events = []
         self._ships = []    # newest first, at most SHIP_EVENTS_TOTAL
         threading.Thread(target=self._loop, daemon=True).start()
@@ -1578,6 +1844,7 @@ class GraphStore:
         # Copies, so the per-file cache keeps its events untouched between publishes.
         ships = [{**s, "agent": aliases.get(s["agent"], s["agent"]),
                   "target": ship_target(s.get("folder"), doc_groups)} for s in ships[:SHIP_EVENTS_TOTAL]]
+        jevs = jev_rows([parsed for _, parsed in self._files.values()], now, aliases)
         out = [{
             "src": src, "dst": dst, "kind": kind,
             "count": e["count"], "lastAt": e["lastAt"],
@@ -1589,6 +1856,7 @@ class GraphStore:
             "edges": out,
             "generatedAt": now,
             "ships": ships,
+            "jevs": jevs,       # newest first; see jev_rows
         }
         with self._lock:
             self._snapshot = snapshot

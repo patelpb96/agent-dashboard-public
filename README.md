@@ -21,6 +21,8 @@ background job.
 - **Ship events.** When an agent's `git push` or `gh pr create` succeeds, a beam of light shoots out of
   the agent and out of its repo's folder on the graph. A Ships window lists the newest commits, pushes
   and pull requests (failed ones greyed out) with a link to each GitHub PR; click a row to replay its beam.
+- **Jev circuit.** When an agent asks [Jev](#jev-circuit) for a decision, a packet runs from the agent to
+  the Jev node and back, the node scans while Jev decides, and a marker at the agent says what came back.
 
 ## Requirements
 
@@ -86,6 +88,45 @@ folder in your file manager. Network paths (`\\server\share`) are refused.
 
 The scripts and stylesheet it loads from jsDelivr are pinned by version and by subresource integrity,
 so the browser will not use a file that has changed.
+
+## Jev circuit
+
+Agents call Jev, a decision model, through the MCP tool `jev_decide` on the server `jev`. The call lands on
+the node `mcp:jev:jev_decide`, drawn as a square cyan lens with a cross-hair. For each call a small cyan
+packet travels the straight line from the agent to the lens (180 ms), a line sweeps down the lens while
+the call is pending (900 ms cycle), the packet returns when a result is in (220 ms), and a marker sits at
+the agent for 1.2 s:
+
+| Marker | Meaning |
+|---|---|
+| filled cyan square | **applied**: Jev's policy picked a value (not proof that the agent acted on it) |
+| hollow amber diamond | **partly applied**: some decisions applied, some fell back |
+| filled amber diamond | **fell back**: nothing was applied |
+| red cross | **failed**: Jev did not answer (with fail-open, the agent fell back) |
+| hollow square (text colour) | **answered** (neither applied nor fell back) or **done** (the result could not be read) |
+| hollow grey square | **gave no result**: a new user turn started, or the session went quiet, while it was pending |
+| dashed grey square | **call out of view**: it dropped out of the list while pending |
+
+A line at the bottom of the plane says the same in words, for example
+`proj: Jev applied (generic, all applied, confidence 0.823 ≥ 0.700 applied, Jev 412 ms)`. With reduced
+motion there is no travel or sweep: a dashed frame holds on the lens while pending and the marker stands
+still. Loading or reloading the page never replays history: calls already finished are not animated, and
+a call first seen finished gets one marker only if it ended in the last 15 s.
+
+Only a call whose tool is exactly `mcp__jev__jev_decide` counts (Codex's `namespace` `mcp__jev` plus
+`name` `jev_decide` is joined into that name). `/api/graph` sends the newest calls in `jevs`, newest
+first, at most 8 per agent and 40 in all: `{id, agent, at, end, phase, outcome}`, where `id` is a hash
+(the call id is never sent) and `phase` is `pending`, `done` or `missing`.
+
+**What of a Jev result is read.** Only a result matched to a Jev call that is still waiting in the
+same user turn, and only when its text is at most 64 KB of JSON (one level of an MCP `{"content": [...]}`
+wrapper is unwrapped). Of it, only: `ok`, `failOpen`, `latencyMs` (0 to 1 hour), `policy` (one of `none`,
+`generic`, `contextKeep`, `routeModel`, `safetyGate`, `shouldContinue`, else `other`), `decision.applied`,
+`decision.reason` and `error.reason` (each from a fixed list of codes, else `other`; never the error's
+message), and up to 8 audit rows of `applied` with a confidence and its threshold, or a yes/no decision's
+two thresholds, as whole per-mille numbers. The request, answers, probabilities, choice, value, ids,
+model, risks, redactions and every message are never kept. Numbers out of range are dropped. Antigravity
+transcripts are not checked for Jev calls.
 
 ## Configuration
 
@@ -161,8 +202,10 @@ Members then install it with the `git clone` command above, and update with `git
 | `runstate.py` | Records that the server is running, and why it last stopped (`--status`) |
 | `paths.py` | Every folder the dashboard reads, plus the environment overrides |
 | `index.html`, `plane.js` | The page and the 3D view |
+| `jev.js` | The Jev circuit's cue rules (pure; tested with `node --test`) |
 | `newsroom.py` | Demo workload |
 | `test_*.py` | Unit tests (`python -m unittest discover -p "test_*.py"`) |
+| `jev.test.js` | Tests for `jev.js` (`node --test`, Node 18 or newer) |
 
 ## License
 
