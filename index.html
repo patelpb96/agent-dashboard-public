@@ -500,15 +500,16 @@ function render(data) {
 }
 
 function updateRuntimeStatus(agents) {
-  const labels = { claude: "Claude Code", codex: "Codex/GPT", pi: "Pi", openai: "OpenAI/GPT", gpt: "GPT",
-    antigravity: "Antigravity/Gemini" };
-  const counts = new Map();
+  const labels = { claude: "Claude", "claude-code": "Claude", codex: "GPT", "codex-cli": "GPT", openai: "GPT",
+    gpt: "GPT", pi: "Pi", antigravity: "Google", "antigravity-cli": "Google" };
+  const counts = new Map();   // keyed by the shown name, so Codex and OpenAI agents add up under one "GPT"
   for (const agent of agents) {
     const domain = String(agent.domain || agent.provider || "other").toLowerCase();
-    counts.set(domain, (counts.get(domain) || 0) + 1);
+    const name = labels[domain] || domain;
+    counts.set(name, (counts.get(name) || 0) + 1);
   }
   const domains = [...counts].sort(([a], [b]) => a.localeCompare(b))
-    .map(([domain, count]) => `${labels[domain] || domain} ${count}`);
+    .map(([name, count]) => `${name} ${count}`);
   latestRuntimeStatus = `${agents.length} live agents${domains.length ? " · " + domains.join(" · ") : ""} · refreshed ${new Date().toLocaleTimeString()}`;
   if (!isWatchPage()) {
     document.getElementById("status").textContent = latestRuntimeStatus;

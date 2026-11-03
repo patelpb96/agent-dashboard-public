@@ -97,7 +97,7 @@ def _canonical_domain(value):
     compact = re.sub(r"[\s_-]+", "-", value)
     if compact in {"claude", "claude-code", "anthropic"}:
         return "claude"
-    if compact in {"codex", "codex-cli", "openai-codex"}:
+    if compact in {"codex", "codex-cli", "openai-codex", "openai", "gpt"}:   # all shown as "GPT"
         return "codex"
     if compact in {"antigravity", "antigravity-cli", "agy", "google-antigravity"}:
         return "antigravity"
@@ -888,7 +888,7 @@ def parse_codex_file(path, now=None):
     active = latest_started > latest_finished and now - max(latest_activity, latest_started) <= CODEX_ACTIVE_S
     if open_calls and now - latest_activity <= ACTIVE_S:
         active = True
-    label = f"Codex · {project} · {str(session_id)[-6:]}"
+    label = f"GPT · {project} · {str(session_id)[-6:]}"
     nodes[agent] = {"kind": "agent", "label": label, "name": label, "provider": "codex", "domain": "codex",
                     "space": "codex", "environment": _environment(meta), "state": "working" if active else "done", "model": model,
                     "cwd": cwd, "mtime": mtime, "open": active}
@@ -1183,14 +1183,16 @@ def antigravity_summaries(root=None):
 
 
 def antigravity_present(conversation_id, root=None):
-    """True while an Antigravity CLI holds the conversation's presence lock, False once nobody does,
-    None when that can't be told (no lock file, or not Windows, where the lock isn't probed)."""
+    """True while an Antigravity CLI holds the conversation's presence lock, False when nobody holds it,
+    None when that can't be told (no lock file, or not Windows, where the lock isn't probed).
+    Only True means anything: the lock is held while a turn runs, and a resumed or idle CLI can keep
+    writing to the conversation without holding it, so False is not proof the CLI has exited."""
     lock = Path(root or ANTIGRAVITY_DIR) / "presence" / f"{conversation_id}.lock"
     if os.name != "nt" or not lock.is_file():
         return None
     try:
         with lock.open("rb"):
-            return False     # nobody holds it: the CLI that wrote it has exited
+            return False     # nobody holds it right now
     except PermissionError:
         return True
     except OSError:
@@ -1290,17 +1292,17 @@ def parse_antigravity_db(path, now=None, summary=None, present=None):
 
     latest_activity = max(latest_activity, mtime)
     recent = now - latest_activity <= ANTIGRAVITY_ACTIVE_S
-    is_open = present if present is not None else recent
+    is_open = bool(present) or recent   # a free lock is not proof of exit; recent writes are proof of life
     if summary.get("killed"):
         is_open = False
     if not is_open:
-        open_calls.clear()   # steps left "running" by a CLI that has exited are not in flight
+        open_calls.clear()   # steps left "running" by a CLI that went quiet are not in flight
     running = str(summary.get("status") or "").endswith("_RUNNING") and bool(summary.get("not_fully_idle", 1))
     working = bool(is_open and recent and (open_calls or running or last_type == AG_STEP_TOOL))
     title = str(summary.get("agent_name") or summary.get("title") or "").strip()
-    label = f"Antigravity · {project} · {conversation_id[-6:]}"
+    label = f"Google · {project} · {conversation_id[-6:]}"
     if parent_id:
-        nodes.setdefault(parent_id, {"kind": "agent", "label": f"Antigravity · {project} · {parent_cid[-6:]}",
+        nodes.setdefault(parent_id, {"kind": "agent", "label": f"Google · {project} · {parent_cid[-6:]}",
                                      "provider": "antigravity", "domain": "antigravity", "space": "antigravity",
                                      "environment": "local", "cwd": cwd, "mtime": mtime, "open": is_open,
                                      "_parentStub": True})

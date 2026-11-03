@@ -2,6 +2,7 @@
 The fixtures are built here with a tiny protobuf encoder, laid out like real Antigravity CLI files.
 Run with: python -m unittest test_antigravity -v"""
 import json
+import os
 import sqlite3
 import tempfile
 import threading
@@ -107,7 +108,7 @@ class Antigravity(unittest.TestCase):
         agent = parsed["nodes"]["antigravity:conv-aaaa11"]
         self.assertEqual((agent["domain"], agent["model"], agent["cwd"], agent["title"]),
                          ("antigravity", "gemini-4-argon-trial", "C:/work/widget", "Fix widgets"))
-        self.assertEqual(agent["label"], "Antigravity · widget · aaaa11")
+        self.assertEqual(agent["label"], "Google · widget · aaaa11")
         dsts = {dst for (_, dst, _) in parsed["edges"]}
         self.assertIn("shared:tool:shell", dsts)
         self.assertIn("web:search_web", dsts)
@@ -123,11 +124,22 @@ class Antigravity(unittest.TestCase):
         self.assertEqual(parsed["nodes"]["antigravity:conv-run"]["state"], "working")
         self.assertEqual(len(parsed["open"]), 1)
 
-    def test_closed_cli_leaves_nothing_in_flight(self):
+    def test_free_lock_with_recent_writes_is_still_open(self):
+        # the real CLI keeps writing a conversation while its presence lock is free (seen Nov 2026)
+        t = self.now - 5
+        path = self.db("conv-live", [(graph.AG_STEP_TOOL, 3, tool_step(t, "c1", "read_file", {"Path": "C:\\a.txt"},
+                                                                       "x", t + 1))])
+        node = graph.parse_antigravity_db(path, self.now + 10, {"status": "CASCADE_RUN_STATUS_RUNNING"},
+                                          present=False)["nodes"]["antigravity:conv-live"]
+        self.assertEqual((node["open"], node["state"]), (True, "working"))
+
+    def test_quiet_conversation_with_free_lock_is_done_and_nothing_in_flight(self):
         t = self.now - 20
         path = self.db("conv-gone", [(graph.AG_STEP_TOOL, graph.AG_STATUS_RUNNING,
                                       tool_step(t, "c1", "read_file", {"Path": "C:\\a.txt"}))])
-        parsed = graph.parse_antigravity_db(path, self.now, {}, present=False)
+        later = self.now + graph.ANTIGRAVITY_ACTIVE_S + 60
+        os.utime(path, (t, t))   # nothing written since the step
+        parsed = graph.parse_antigravity_db(path, later, {}, present=False)
         node = parsed["nodes"]["antigravity:conv-gone"]
         self.assertEqual((node["state"], node["open"], parsed["open"]), ("done", False, {}))
 

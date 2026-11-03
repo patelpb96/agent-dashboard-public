@@ -122,12 +122,13 @@
   function domainOf(node) {
     const raw = String(node.domain || node.provider || "other").toLowerCase();
     return ({ "claude-code": "claude", claude_code: "claude", "claude code": "claude", anthropic: "claude",
-      "codex-cli": "codex", codex_cli: "codex", "antigravity-cli": "antigravity", agy: "antigravity" })[raw] || raw;
+      "codex-cli": "codex", codex_cli: "codex", openai: "codex", gpt: "codex",   // one "GPT" runtime
+      "antigravity-cli": "antigravity", agy: "antigravity" })[raw] || raw;
   }
 
   function domainLabel(domain) {
-    return ({ claude: "CLAUDE CODE", claude_code: "CLAUDE CODE", "claude-code": "CLAUDE CODE",
-      codex: "CODEX / GPT", openai: "OPENAI / GPT", gpt: "GPT", pi: "PI", antigravity: "ANTIGRAVITY / GEMINI",
+    return ({ claude: "CLAUDE", claude_code: "CLAUDE", "claude-code": "CLAUDE",
+      codex: "GPT", openai: "GPT", gpt: "GPT", pi: "PI", antigravity: "GOOGLE",
       cloud: "CLOUD" })[domain] || String(domain).replace(/[-_]/g, " ").toUpperCase();
   }
 
