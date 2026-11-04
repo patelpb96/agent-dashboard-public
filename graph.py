@@ -57,16 +57,18 @@ READ_TOOLS = {"Read"}
 TOOL_GROUPS = {
     "files": ({"Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "LS",
                 "read_file", "write_file", "edit_file", "apply_patch", "list_dir", "grep_files", "glob_files",
-                "read", "write", "edit", "find", "grep", "ls"}, "files"),
+                "read", "write", "edit", "find", "grep", "ls", "glob", "read_image"}, "files"),
     "shell": ({"Bash", "PowerShell", "BashOutput", "KillShell", "Monitor", "exec",
-                "exec_command", "shell", "powershell", "bash", "run_command", "write_stdin"}, "shell"),
+                "exec_command", "shell", "powershell", "bash", "run_command", "write_stdin",
+                "pwsh", "job_output", "job_kill", "job_list"}, "shell"),
     "agents": ({"Agent", "Task", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop",
                 "TaskOutput", "ListAgents", "spawn_agent", "send_message", "followup_task",
                 "list_agents", "interrupt_agent", "invoke_subagent", "define_subagent",
-                "manage_subagents", "manage_task"}, "agents"),
+                "manage_subagents", "manage_task", "spawn_teammate", "wait_agent", "subagent",
+                "subagent_fork", "team_task_create", "team_task_update", "team_task_get", "team_task_list"}, "agents"),
     "plan": ({"TodoWrite", "EnterPlanMode", "ExitPlanMode", "AskUserQuestion", "Skill",
               "ToolSearch", "ScheduleWakeup", "request_user_input", "create_goal", "update_goal",
-              "get_goal", "wait", "schedule"}, "planning"),
+              "get_goal", "wait", "schedule", "todo_write", "skill"}, "planning"),
 }
 CODEX_WEB_TOOLS = {"web_search", "web_fetch", "web__run", "browser", "browser_search", "browser_open",
                    "open", "click", "image_query", "finance", "weather", "sports",
@@ -378,7 +380,8 @@ def detail_of(inp):
 SHIP_EVENTS_TOTAL = 200     # newest ship events kept across all transcripts
 # Tools that start a shell command. BashOutput, KillShell, Monitor and write_stdin only watch or feed
 # a command that is already running, so they never start a commit or a push themselves.
-SHELL_RUN_TOOLS = {"Bash", "PowerShell", "exec", "exec_command", "shell", "powershell", "bash", "run_command"}
+SHELL_RUN_TOOLS = {"Bash", "PowerShell", "exec", "exec_command", "shell", "powershell", "bash", "run_command",
+                   "pwsh"}
 SHELLS = {"bash", "sh", "zsh", "dash", "fish", "pwsh", "powershell", "cmd"}
 SHIP_TEXT_MAX = 200         # branch and remote names are shown as plain text; keep them short
 # The only text from a transcript the page may turn into a link. ASCII only, so look-alike
@@ -1636,6 +1639,179 @@ def dsh_key(root=None, now=None):
     return tuple(sorted(stats)), int((now or time.time()) // 60)
 
 
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+DSH_READ_MAX = 32 * 1024 * 1024   # compressed bytes decoded per pass; a longer backlog is read over several passes
+DSH_TAIL_RECORDS = 4000            # newest tool records kept per transcript
+DSH_ARG_MAX = 4000                 # longest argument / result text kept (enough for a command and git's output)
+# Splits appended zstd frames at the magic number and decodes each; a cut that fails to decode was the magic
+# number inside compressed data (or a frame still being written), so it is merged with the next piece.
+# Prints how many bytes decoded cleanly, a newline, then the text.
+_NODE_ZSTD = ("const z=require('zlib'),c=[];process.stdin.on('data',d=>c.push(d)).on('end',()=>{"
+              "const b=Buffer.concat(c),M=Buffer.from([0x28,0xb5,0x2f,0xfd]),cuts=[];"
+              "for(let i=b.indexOf(M,1);i>=0;i=b.indexOf(M,i+1))cuts.push(i);cuts.push(b.length);"
+              "let s=0;const o=[];for(const e of cuts){try{o.push(z.zstdDecompressSync(b.subarray(s,e)));s=e}catch{}}"
+              "process.stdout.write(s+'\\n');process.stdout.write(Buffer.concat(o))})")
+_zstd_decoder = None   # resolved on first use: "stdlib", "node", or "" when neither works
+_DSH_TAILS = {}        # transcript path -> incremental decode state
+
+
+def _zstd_split(data, decode_one):
+    cuts, i = [], data.find(ZSTD_MAGIC, 1)
+    while i >= 0:
+        cuts.append(i)
+        i = data.find(ZSTD_MAGIC, i + 1)
+    cuts.append(len(data))
+    start, out = 0, []
+    for end in cuts:
+        try:
+            out.append(decode_one(data[start:end]))
+            start = end
+        except Exception:   # noqa: BLE001 - any decoder error means "not a whole frame yet"
+            continue
+    return b"".join(out), start
+
+
+def _zstd_node(data):
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        raise OSError("node not found")
+    done = subprocess.run([node, "-e", _NODE_ZSTD], input=data, capture_output=True, timeout=30,
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=True)
+    head, _, text = done.stdout.partition(b"\n")
+    return text, int(head)
+
+
+def zstd_frames(data):
+    """(decoded bytes, bytes consumed) for a run of appended zstd frames; consumed stops before a frame that
+    is incomplete. Python 3.14's compression.zstd when present, else Node's zlib (Node 22.15+)."""
+    global _zstd_decoder
+    if not data:
+        return b"", 0
+    if _zstd_decoder in (None, "stdlib"):
+        try:
+            from compression import zstd   # Python 3.14+
+        except ImportError:
+            pass
+        else:
+            _zstd_decoder = "stdlib"
+            return _zstd_split(data, zstd.decompress)
+    if _zstd_decoder in (None, "node"):
+        try:
+            out = _zstd_node(data)
+        except Exception:   # noqa: BLE001 - no decoder: Sessions still show, without their calls
+            if _zstd_decoder is None:
+                _zstd_decoder = ""
+        else:
+            _zstd_decoder = "node"
+            return out
+    return b"", 0
+
+
+def _dsh_clip(value):
+    if isinstance(value, str):
+        return value[:DSH_ARG_MAX]
+    if isinstance(value, dict):
+        return {k: _dsh_clip(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_dsh_clip(v) for v in value[:50]]
+    return value
+
+
+def dsh_records(path):
+    """Tool calls and results of one DSH transcript, decoding only the frames appended since the last read.
+    Records: ("call", at, call_id, name, args) and ("result", at, call_id, is_error, text)."""
+    path = Path(path)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return []
+    state = _DSH_TAILS.get(path)
+    if state is None or size < state["offset"]:   # new, or rewritten from scratch
+        state = _DSH_TAILS[path] = {"offset": 0, "partial": b"", "records": []}
+    if size > state["offset"]:
+        try:
+            with path.open("rb") as f:
+                f.seek(state["offset"])
+                data = f.read(DSH_READ_MAX)
+        except OSError:
+            return state["records"]
+        text, used = zstd_frames(data)
+        if used:
+            state["offset"] += used
+            lines = (state["partial"] + text).split(b"\n")
+            state["partial"] = lines.pop()
+            records = state["records"]
+            for raw in lines:
+                if b'"tool/' not in raw:
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                kind, body = entry.get("type"), entry.get("data") or {}
+                at = (entry.get("time") or 0) / 1000
+                if kind == "tool/call":
+                    try:
+                        args = json.loads(body.get("arguments") or "{}")
+                    except (TypeError, ValueError):
+                        args = {}
+                    records.append(("call", at, body.get("callId"), str(body.get("name") or ""),
+                                    _dsh_clip(args) if isinstance(args, dict) else {}))
+                elif kind == "tool/result":
+                    msg = body.get("message") or {}
+                    records.append(("result", at, msg.get("toolCallId"), bool(msg.get("isError")),
+                                    _result_text(msg.get("content"))[:DSH_ARG_MAX]))
+            del records[:-DSH_TAIL_RECORDS]
+    return state["records"]
+
+
+def _dsh_calls(agent, cwd, records, is_open, nodes, edges):
+    """Events, in-flight calls and ship events of one DSH Session, drawn like the other runtimes'."""
+    events, open_calls, ships, pending = [], {}, [], {}
+    for rec in records:
+        if rec[0] == "call":
+            _, at, call_id, name, inp = rec
+            if not name:
+                continue
+            unique = {}
+            for target in (target_of(name, inp), shared_type_target(name), path_target_from_input(inp, cwd),
+                           shared_target_from_input(inp, cwd)):
+                if target:
+                    target.setdefault("space", "shared" if target.get("space") == "shared" else "deepseek")
+                    unique[target["id"]] = target
+            calls, detail = [], detail_of(inp)
+            for target in unique.values():
+                nodes[target["id"]] = {k: target[k] for k in ("kind", "label", "group", "groupLabel", "space")}
+                key = (agent, target["id"], target.get("edge", "call"))
+                edge = edges.setdefault(key, {"count": 0, "lastAt": 0.0})
+                edge["count"] += 1
+                edge["lastAt"] = max(edge["lastAt"], at)
+                call = {"at": at, "src": agent, "dst": target["id"], "kind": target.get("edge", "call"),
+                        "tool": name, "detail": detail or target.get("detail", ""), "ms": None}
+                events.append(call)
+                calls.append(call)
+            if call_id and calls:
+                open_calls[call_id] = calls
+            steps = ship_steps(command_of(name, inp), cwd)
+            if call_id and steps:
+                pending[call_id] = (steps, at)
+        else:
+            _, at, call_id, is_error, text = rec
+            for call in open_calls.pop(call_id, None) or []:
+                call["ms"] = max(0, int((at - call["at"]) * 1000)) if at and call["at"] else None
+            steps = pending.pop(call_id, None)
+            if steps:
+                ships.extend(ship_events(agent, call_id, steps[0], text, at or steps[1],
+                                         is_error or _exit_failed(text)))
+    if not is_open:
+        open_calls.clear()   # calls left without a result by a Session that went quiet are not in flight
+    return events[-EVENTS_PER_FILE:], open_calls, ships
+
+
 def parse_dsh(root=None, now=None):
     """Every DeepSeek Harness Session touched within the graph window, as one parsed bundle."""
     now = now or time.time()
@@ -1643,14 +1819,14 @@ def parse_dsh(root=None, now=None):
     transcripts = {}
     for t in (root / "sessions").glob("*/*/session.v4.jsonl.zstd"):
         try:
-            transcripts[t.parent.name] = t.stat().st_mtime
+            transcripts[t.parent.name] = (t, t.stat().st_mtime)
         except OSError:
             pass
     archived, ws_titles = _dsh_workspace(root)
     sessions, parents = {}, {}
     for path in (root / "storages" / "session_projcache" / "sessions").glob("*.json"):
         try:
-            mtime = max(path.stat().st_mtime, transcripts.get(path.stem, 0.0))
+            mtime = max(path.stat().st_mtime, transcripts.get(path.stem, (None, 0.0))[1])
         except OSError:
             continue
         if now - mtime > GRAPH_WINDOW_S:
@@ -1662,7 +1838,7 @@ def parse_dsh(root=None, now=None):
         for child in ((rows.get("subagentCatalog") or {}).get("head") or {}).get("values") or []:
             if isinstance(child, dict) and child.get("childId"):
                 parents[child["childId"]] = (path.stem, child.get("label"))
-    nodes, edges = {}, {}
+    nodes, edges, events, open_calls, ships = {}, {}, [], {}, []
     for sid, (rows, mtime) in sessions.items():
         agent = "deepseek:" + sid
         cwd = rows.get("workingDirectory") or ""
@@ -1685,6 +1861,12 @@ def parse_dsh(root=None, now=None):
         label = f"DeepSeek · {project} · {sid[-6:]}"
         if parent_id:
             edges[(parent_id, agent, "spawn")] = {"count": 1, "lastAt": mtime}
+        transcript = transcripts.get(sid, (None, 0.0))[0]
+        if transcript is not None:
+            ev, oc, sh = _dsh_calls(agent, cwd, dsh_records(transcript), is_open, nodes, edges)
+            events.extend(ev)
+            open_calls.update(oc)
+            ships.extend(sh)
         nodes[agent] = {"kind": "subagent" if parent_id else "agent", "label": label, "name": label,
                         "parent": parent_id, "provider": "deepseek", "domain": "deepseek", "space": "deepseek",
                         "environment": "local", "title": title or None, "state": state, "model": model,
@@ -1698,9 +1880,13 @@ def parse_dsh(root=None, now=None):
             nodes[parent] = {"kind": "agent", "label": f"DeepSeek · {parent[-6:]}", "provider": "deepseek",
                              "domain": "deepseek", "space": "deepseek", "environment": "local",
                              "mtime": node["mtime"], "open": node["open"], "_parentStub": True}
-    activity = max((n["mtime"] for n in nodes.values()), default=0.0)
-    return {"agent": "deepseek", "provider": "deepseek", "nodes": nodes, "edges": edges, "open": {},
-            "events": [], "ships": [], "activity": activity, "activeWindow": DSH_ACTIVE_S}
+    activity = max((n["mtime"] for n in nodes.values() if n.get("kind") in ("agent", "subagent")), default=0.0)
+    for path in [p for p in _DSH_TAILS if p.parent.parent.parent == root / "sessions"]:
+        if path.parent.name not in sessions:
+            _DSH_TAILS.pop(path, None)   # Sessions that left the window stop holding decoded records
+    return {"agent": "deepseek", "provider": "deepseek", "nodes": nodes, "edges": edges, "open": open_calls,
+            "events": events, "ships": ships[-SHIP_EVENTS_TOTAL:], "activity": activity,
+            "activeWindow": DSH_ACTIVE_S}
 
 
 def load_rosters(now, directory=None):
