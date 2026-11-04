@@ -1,7 +1,7 @@
 # Agent Dashboard
 
 A local web dashboard for the coding agents running on your machine. It reads the session transcripts
-that Claude Code, Codex, Pi and Google Antigravity already write to disk, and draws them as a rotatable 3D graph: each
+that Claude Code, Codex, Pi, Google Antigravity and the DeepSeek Harness already write to disk, and draws them as a rotatable 3D graph: each
 agent is a node, linked to the files, web tools, MCP servers and other agents it touches. Around the
 graph it shows live usage and cost, which agents are waiting on you, and a terminal view of any
 background job.
@@ -28,8 +28,8 @@ background job.
 
 A bar above the graph decides what it shows. Your choices are kept in this browser (`localStorage`).
 
-- **Agents.** One chip per runtime on the graph: Claude, GPT (Codex and OpenAI), Pi and Google
-  (Antigravity), each with its count. Click a chip to hide or show that runtime's agents. The **Model**
+- **Agents.** One chip per runtime on the graph: Claude, GPT (Codex and OpenAI), Pi, Google
+  (Antigravity) and DeepSeek (DeepSeek Harness), each with its count. Click a chip to hide or show that runtime's agents. The **Model**
   menu lists the models in use, grouped by runtime with counts, so you can hide one model. A hidden agent
   takes its lines with it, and a tool or file that only hidden agents used goes too.
 - **Tools & files.** **All** shows everything the shown agents used. **Active** keeps only what is in use
@@ -58,6 +58,7 @@ biggest groups; hovering a node or a group always names it.
   | Codex CLI | `~/.codex/sessions` |
   | Pi | `~/.pi/agent/sessions` |
   | Google Antigravity CLI (Gemini) | `~/.gemini/antigravity-cli/conversations` |
+  | DeepSeek Harness | `~/.dsh/storages/session_projcache/sessions` (the Harness's own per-Session JSON projection) |
 - Optional: the `claude` CLI on `PATH`, for the live log view and for `newsroom.py` live runs
 
 ## Install
@@ -162,6 +163,7 @@ Everything is set with environment variables. All of them are optional.
 | `CODEX_HOME` | `~/.codex` | Codex home folder (Codex uses the same variable) |
 | `AGENT_DASH_PI_SESSIONS` | `~/.pi/agent/sessions` | Pi session transcripts |
 | `AGENT_DASH_ANTIGRAVITY_DIR` | `~/.gemini/antigravity-cli` | Antigravity CLI data: one SQLite file per conversation, read read-only |
+| `AGENT_DASH_DSH_DIR` | `~/.dsh` | DeepSeek Harness data: its per-Session projection cache and `workspace.json`, read only |
 | `AGENT_DASH_ROSTER_DIR` | `<CLAUDE_CONFIG_DIR>/agent-roster` | Roster files (below) |
 | `AGENT_DASH_SHARED_DIR` | unset (off) | A folder your agents use to pass work to each other. When set, every touch inside it is drawn as one shared node instead of many file nodes |
 | `AGENT_DASH_SIM_ROOT` | `~/newsroom-sim` | Workspaces for `newsroom.py` |

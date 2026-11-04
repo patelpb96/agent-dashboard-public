@@ -15,9 +15,9 @@
 
   const DOMAIN_ALIASES = { "claude-code": "claude", claude_code: "claude", "claude code": "claude", anthropic: "claude",
     "codex-cli": "codex", codex_cli: "codex", openai: "codex", gpt: "codex",   // one "GPT" runtime
-    "antigravity-cli": "antigravity", agy: "antigravity", google: "antigravity" };
-  const RUNTIME_NAMES = { claude: "Claude", codex: "GPT", pi: "Pi", antigravity: "Google" };
-  const RUNTIME_ORDER = ["claude", "codex", "pi", "antigravity"];
+    "antigravity-cli": "antigravity", agy: "antigravity", google: "antigravity", dsh: "deepseek" };
+  const RUNTIME_NAMES = { claude: "Claude", codex: "GPT", pi: "Pi", antigravity: "Google", deepseek: "DeepSeek" };
+  const RUNTIME_ORDER = ["claude", "codex", "pi", "antigravity", "deepseek"];
 
   const isAgent = n => !!n && (n.kind === "agent" || n.kind === "subagent");
 

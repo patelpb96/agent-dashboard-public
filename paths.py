@@ -5,6 +5,7 @@
   AGENT_DASH_PI_SESSIONS     Pi session transcripts (default ~/.pi/agent/sessions)
   AGENT_DASH_ANTIGRAVITY_DIR Google Antigravity CLI data: conversations/*.db and conversation_summaries.db
                              (default ~/.gemini/antigravity-cli)
+  AGENT_DASH_DSH_DIR         DeepSeek Harness data: storages/session_projcache/sessions/*.json (default ~/.dsh)
   AGENT_DASH_ROSTER_DIR      roster files that name agents (default <CLAUDE_CONFIG_DIR>/agent-roster)
   AGENT_DASH_SHARED_DIR      optional folder several agents use to pass work to each other; when set, every
                              touch inside it is drawn as one shared "area" node (default: unset, feature off)
@@ -28,6 +29,7 @@ ROSTER_DIR = _dir("AGENT_DASH_ROSTER_DIR", CLAUDE_DIR / "agent-roster")
 CODEX_SESSIONS_DIR = _dir("CODEX_HOME", HOME / ".codex") / "sessions"
 PI_SESSIONS_DIR = _dir("AGENT_DASH_PI_SESSIONS", HOME / ".pi" / "agent" / "sessions")
 ANTIGRAVITY_DIR = _dir("AGENT_DASH_ANTIGRAVITY_DIR", HOME / ".gemini" / "antigravity-cli")
+DSH_DIR = _dir("AGENT_DASH_DSH_DIR", HOME / ".dsh")
 SHARED_DIR = _dir("AGENT_DASH_SHARED_DIR", None)
 SIM_ROOT = _dir("AGENT_DASH_SIM_ROOT", HOME / "newsroom-sim")
 STATE_DIR = _dir("AGENT_DASH_STATE_DIR", HOME / ".agent-dashboard")

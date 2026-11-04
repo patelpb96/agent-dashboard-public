@@ -557,7 +557,8 @@ function render(data) {
 
 function updateRuntimeStatus(agents) {
   const labels = { claude: "Claude", "claude-code": "Claude", codex: "GPT", "codex-cli": "GPT", openai: "GPT",
-    gpt: "GPT", pi: "Pi", antigravity: "Google", "antigravity-cli": "Google" };
+    gpt: "GPT", pi: "Pi", antigravity: "Google", "antigravity-cli": "Google",
+    deepseek: "DeepSeek", dsh: "DeepSeek" };
   const counts = new Map();   // keyed by the shown name, so Codex and OpenAI agents add up under one "GPT"
   for (const agent of agents) {
     const domain = String(agent.domain || agent.provider || "other").toLowerCase();

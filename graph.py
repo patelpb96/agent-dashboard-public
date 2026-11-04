@@ -37,7 +37,8 @@ from datetime import datetime
 from pathlib import Path, PurePath
 from urllib.parse import unquote, urlsplit
 
-from paths import ANTIGRAVITY_DIR, CODEX_SESSIONS_DIR, PI_SESSIONS_DIR, PROJECTS_DIR, ROSTER_DIR, SHARED_DIR
+from paths import (ANTIGRAVITY_DIR, CODEX_SESSIONS_DIR, DSH_DIR, PI_SESSIONS_DIR, PROJECTS_DIR, ROSTER_DIR,
+                   SHARED_DIR)
 GRAPH_WINDOW_S = 6 * 3600   # only transcripts touched in the last 6 h
 ACTIVE_S = 120              # an unanswered call this recent is in flight
 CODEX_ACTIVE_S = 6 * 60      # Codex doesn't have one process id per session; use recent turn events
@@ -1582,6 +1583,126 @@ def parse_antigravity_db(path, now=None, summary=None, present=None):
             "open": open_calls, "events": events[-EVENTS_PER_FILE:], "ships": ships[-SHIP_EVENTS_TOTAL:]}
 
 
+# ---- DeepSeek Harness (DSH): the transcript is zstd-compressed (sessions/<cwd>/<id>/session.v4.jsonl.zstd),
+# but the Harness keeps a plain-JSON projection of every Session beside it, the same projection its own
+# dashboard plugin reads: storages/session_projcache/sessions/<id>.json -> record.rows.<name>.val.
+# Parent -> child links live only in the parent's subagentCatalog, so all files are read together.
+DSH_ACTIVE_S = 6 * 60      # the projection is rewritten on every step; quiet this long = not open
+DSH_TURN_S = 30 * 60       # an open turn or a pending question keeps a quiet Session open this long
+
+
+def _dsh_json(path):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _dsh_rows(path):
+    rows = ((_dsh_json(path) or {}).get("record") or {}).get("rows")
+    if not isinstance(rows, dict):
+        return None
+    return {k: v.get("val") for k, v in rows.items() if isinstance(v, dict)}
+
+
+def _dsh_workspace(root):
+    """(archived session ids, {session id: workspace title}) from storages/workspace.json."""
+    data = _dsh_json(Path(root) / "storages" / "workspace.json") or {}
+    archived = set((data.get("global") or {}).get("archivedSessionIds") or [])
+    titles = {}
+    for ws in ((data.get("tables") or {}).get("workspaces") or {}).values():
+        if isinstance(ws, dict):
+            for sid in ws.get("sessionIds") or []:
+                titles[sid] = ws.get("title") or ""
+    return archived, titles
+
+
+def _dsh_inputs(root):
+    root = Path(root)
+    return [*(root / "storages" / "session_projcache" / "sessions").glob("*.json"),
+            *(root / "sessions").glob("*/*/session.v4.jsonl.zstd"), root / "storages" / "workspace.json"]
+
+
+def dsh_key(root=None, now=None):
+    """Cache key for parse_dsh: every input file's (name, mtime, size) and the current minute, because
+    open/closed also changes as time passes with no write."""
+    stats = []
+    for p in _dsh_inputs(root or DSH_DIR):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        stats.append((str(p), st.st_mtime, st.st_size))
+    return tuple(sorted(stats)), int((now or time.time()) // 60)
+
+
+def parse_dsh(root=None, now=None):
+    """Every DeepSeek Harness Session touched within the graph window, as one parsed bundle."""
+    now = now or time.time()
+    root = Path(root or DSH_DIR)
+    transcripts = {}
+    for t in (root / "sessions").glob("*/*/session.v4.jsonl.zstd"):
+        try:
+            transcripts[t.parent.name] = t.stat().st_mtime
+        except OSError:
+            pass
+    archived, ws_titles = _dsh_workspace(root)
+    sessions, parents = {}, {}
+    for path in (root / "storages" / "session_projcache" / "sessions").glob("*.json"):
+        try:
+            mtime = max(path.stat().st_mtime, transcripts.get(path.stem, 0.0))
+        except OSError:
+            continue
+        if now - mtime > GRAPH_WINDOW_S:
+            continue
+        rows = _dsh_rows(path)
+        if rows is None:
+            continue
+        sessions[path.stem] = (rows, mtime)
+        for child in ((rows.get("subagentCatalog") or {}).get("head") or {}).get("values") or []:
+            if isinstance(child, dict) and child.get("childId"):
+                parents[child["childId"]] = (path.stem, child.get("label"))
+    nodes, edges = {}, {}
+    for sid, (rows, mtime) in sessions.items():
+        agent = "deepseek:" + sid
+        cwd = rows.get("workingDirectory") or ""
+        project = ws_titles.get(sid) or (Path(cwd).name if cwd else "DeepSeek")
+        last_ms = (rows.get("timeContext") or {}).get("lastMessageTime")
+        activity = max(mtime, (last_ms or 0) / 1000)
+        age = now - activity
+        turn_open = (rows.get("turnBoundary") or {}).get("openTurnStartSeq") is not None
+        asking = bool(((rows.get("userQuestions") or {}).get("questions") or {}).get("active"))
+        is_open = sid not in archived and (age <= DSH_ACTIVE_S or ((turn_open or asking) and age <= DSH_TURN_S))
+        state = ("blocked" if asking else "working" if turn_open else "idle") if is_open else "done"
+        parent_sid, child_label = parents.get(sid, (None, None))
+        parent_id = "deepseek:" + parent_sid if parent_sid else None
+        sub_label = ((rows.get("subagent") or {}).get("identity") or {}).get("label")
+        # a subagent's own title row is drawn from its prompt; the label its parent gave it reads better
+        own = rows.get("title")
+        title = str(((child_label or sub_label or own) if parent_id else own) or "").strip()
+        model = ((rows.get("modelSelection") or {}).get("lastUsed") or {}).get("model")
+        totals = (rows.get("tokenUsage") or {}).get("totals") or {}
+        label = f"DeepSeek · {project} · {sid[-6:]}"
+        if parent_id:
+            edges[(parent_id, agent, "spawn")] = {"count": 1, "lastAt": mtime}
+        nodes[agent] = {"kind": "subagent" if parent_id else "agent", "label": label, "name": label,
+                        "parent": parent_id, "provider": "deepseek", "domain": "deepseek", "space": "deepseek",
+                        "environment": "local", "title": title or None, "state": state, "model": model,
+                        "turns": (rows.get("sessionStats") or {}).get("turns"),
+                        "tokens": sum(v for v in totals.values() if isinstance(v, (int, float))) or None,
+                        "cwd": cwd, "mtime": activity, "open": is_open}
+    # a child whose parent fell out of the window still hangs off a stub, as the other runtimes do
+    for node in list(nodes.values()):
+        parent = node.get("parent")
+        if parent and parent not in nodes:
+            nodes[parent] = {"kind": "agent", "label": f"DeepSeek · {parent[-6:]}", "provider": "deepseek",
+                             "domain": "deepseek", "space": "deepseek", "environment": "local",
+                             "mtime": node["mtime"], "open": node["open"], "_parentStub": True}
+    activity = max((n["mtime"] for n in nodes.values()), default=0.0)
+    return {"agent": "deepseek", "provider": "deepseek", "nodes": nodes, "edges": edges, "open": {},
+            "events": [], "ships": [], "activity": activity, "activeWindow": DSH_ACTIVE_S}
+
+
 def load_rosters(now, directory=None):
     """Roster files touched within the graph window, newest last."""
     directory = directory or ROSTER_DIR
@@ -1762,6 +1883,18 @@ class GraphStore:
                 parsed = parse_antigravity_db(path, now, summaries.get(path.stem), present)
                 if parsed is not None:
                     self._files[path] = (key, parsed)
+        dsh_cache = DSH_DIR / "storages" / "session_projcache"
+        if dsh_cache.is_dir():
+            key = dsh_key(DSH_DIR, now)
+            cached = self._files.get(dsh_cache)
+            if not cached or cached[0] != key:
+                parsed = parse_dsh(DSH_DIR, now)
+                if parsed["nodes"]:
+                    self._files[dsh_cache] = (key, parsed)
+                else:
+                    self._files.pop(dsh_cache, None)
+        else:
+            self._files.pop(dsh_cache, None)
         for path in list(self._files):
             if (PROJECTS_DIR in path.parents or CODEX_SESSIONS_DIR in path.parents or
                     PI_SESSIONS_DIR in path.parents or conversations in path.parents) and path not in seen:

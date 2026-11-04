@@ -248,7 +248,7 @@ def open_session_ids():
     return out
 
 
-SELF_TRACKED = ("codex", "pi", "antigravity")   # runtimes whose parser decides `open` from their own files
+SELF_TRACKED = ("codex", "pi", "antigravity", "deepseek")   # runtimes whose parser decides `open` from their own files
 
 
 def mark_open(nodes, open_ids, now):
