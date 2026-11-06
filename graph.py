@@ -899,6 +899,11 @@ def parse_file(path):
                     continue
                 if not isinstance(entry, dict):
                     continue
+                # Only the conversation itself: Claude Code also writes `api-request-blob` lines (Oct 2026 on) that
+                # replay earlier tool calls with no timestamp, and `attachment` lines that quote them. Reading those
+                # counted every replayed call again, Jev calls included.
+                if entry.get("type") not in (None, "assistant", "user"):
+                    continue
                 at = _ts(entry.get("timestamp")) or 0.0
                 if jev_turn and _claude_user_turn(entry):
                     jev.turn_started(at)

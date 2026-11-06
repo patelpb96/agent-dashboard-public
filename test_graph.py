@@ -27,6 +27,27 @@ class ParseFile(unittest.TestCase):
         self.dir = Path(tempfile.mkdtemp())
         self.now = time.time()
 
+    def test_replayed_request_lines_are_not_counted_again(self):
+        # Claude Code's api-request-blob lines resend earlier tool calls without a timestamp (seen Nov 2026)
+        at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.now - 60))
+        jev = '{"ok": true, "failOpen": false, "policy": "generic", "decision": {"applied": true, "reason": "all_applied", "audit": []}}'
+        rows = [
+            {"type": "assistant", "timestamp": at, "message": {"content": [
+                use("t1", "Read", {"file_path": "C:/w/a.py"}), use("j1", "mcp__jev__jev_decide", {"policy": "generic"})]}},
+            {"type": "user", "timestamp": at, "message": {"content": [
+                result("t1"), result("j1", [{"type": "text", "text": jev}])]}},
+            {"type": "api-request-blob", "message": {"content": [
+                use("t1", "Read", {"file_path": "C:/w/a.py"}), use("j1", "mcp__jev__jev_decide", {"policy": "generic"})]}},
+            {"type": "attachment", "timestamp": at, "message": {"content": [use("j1", "mcp__jev__jev_decide", {})]}},
+        ]
+        path = self.dir / "replay.jsonl"
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        parsed = graph.parse_file(path)
+        self.assertEqual(sum(1 for e in parsed["events"] if e["tool"] == "Read"), 1)
+        self.assertTrue(all(e["at"] for e in parsed["events"]))
+        self.assertEqual(len(parsed["jevs"]), 1)
+        self.assertEqual(parsed["jevs"][0]["phase"], "done")
+
     def iso(self, offset):
         return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.now + offset))
 
