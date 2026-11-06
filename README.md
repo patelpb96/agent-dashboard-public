@@ -164,6 +164,7 @@ Everything is set with environment variables. All of them are optional.
 | `AGENT_DASH_PI_SESSIONS` | `~/.pi/agent/sessions` | Pi session transcripts |
 | `AGENT_DASH_ANTIGRAVITY_DIR` | `~/.gemini/antigravity-cli` | Antigravity CLI data: one SQLite file per conversation, read read-only |
 | `AGENT_DASH_DSH_DIR` | `~/.dsh` | DeepSeek Harness data: its per-Session projection cache and `workspace.json`, read only |
+| `AGENT_DASH_FEED_DIR` | `~/.agent-dashboard/feeds` | Open feeds: any harness or hook appends `<runtime>/<session>.jsonl` here ([format](docs/feed-format.md)); a UNC path turns feeds off |
 | `AGENT_DASH_ROSTER_DIR` | `<CLAUDE_CONFIG_DIR>/agent-roster` | Roster files (below) |
 | `AGENT_DASH_SHARED_DIR` | unset (off) | A folder your agents use to pass work to each other. When set, every touch inside it is drawn as one shared node instead of many file nodes |
 | `AGENT_DASH_SIM_ROOT` | `~/newsroom-sim` | Workspaces for `newsroom.py` |
@@ -229,6 +230,7 @@ Members then install it with the `git clone` command above, and update with `git
 | `index.html`, `plane.js` | The page and the 3D view |
 | `jev.js` | The Jev circuit's cue rules (pure; tested with `node --test`) |
 | `filters.js` | The filter bar's rules, the runtime names and colours `/api/graph` sends, and the cube projection (pure; tested with `node --test`) |
+| `feed.py` | Writes an open feed, from Python or a hook's command line ([format](docs/feed-format.md)) |
 | `newsroom.py` | Demo workload |
 | `test_*.py` | Unit tests (`python -m unittest discover -p "test_*.py"`) |
 | `jev.test.js`, `filters.test.js`, `runtimes.test.js` | Tests for `jev.js` and `filters.js` (`node --test`, Node 18 or newer) |

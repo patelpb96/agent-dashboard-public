@@ -35,14 +35,15 @@ import os
 import re
 import shlex
 import sqlite3
+import stat
 import threading
 import time
 from datetime import datetime
 from pathlib import Path, PurePath
 from urllib.parse import unquote, urlsplit
 
-from paths import (ANTIGRAVITY_DIR, CODEX_SESSIONS_DIR, DSH_DIR, PI_SESSIONS_DIR, PROJECTS_DIR, ROSTER_DIR,
-                   SHARED_DIR)
+from paths import (ANTIGRAVITY_DIR, CODEX_SESSIONS_DIR, DSH_DIR, FEED_DIR, PI_SESSIONS_DIR, PROJECTS_DIR,
+                   ROSTER_DIR, SHARED_DIR)
 GRAPH_WINDOW_S = 6 * 3600   # only transcripts touched in the last 6 h
 ACTIVE_S = 120              # an unanswered call this recent is in flight
 CODEX_ACTIVE_S = 6 * 60      # Codex doesn't have one process id per session; use recent turn events
@@ -1944,21 +1945,27 @@ class Runtime:
     A cached unit that find() did not return this pass is dropped.
 
     id is the canonical runtime key (lowercase letters, digits, single hyphens); aliases are other spellings of
-    it the page folds into it (provider names, roster domains); color is #rrggbb; order sorts the filter chips
-    (default: registration order).
+    it the page folds into it (provider names, roster domains); color is #rrggbb, or None to let the page hash
+    one from the id; order sorts the filter chips (default: registration order). source names the runtime's
+    units in the store's cache (default: its id); a second reader that adds units under an id that is already
+    registered (an open feed folder named "claude", see sync_feeds) is passed to the store with its own source.
+
+    Without code, a runtime can also appear through an open feed folder: see sync_feeds and docs/feed-format.md.
     """
 
-    def __init__(self, id, label, color, *, roots, find, parse, key=file_key, aliases=(), order=None):
+    def __init__(self, id, label, color, *, roots, find, parse, key=file_key, aliases=(), order=None, source=None):
         if not isinstance(id, str) or not RUNTIME_ID.fullmatch(id):
             raise ValueError(f"runtime id must be lowercase letters, digits and single hyphens: {id!r}")
         if not isinstance(label, str) or not label.strip() or len(label) > RUNTIME_LABEL_MAX:
             raise ValueError(f"runtime label must be 1 to {RUNTIME_LABEL_MAX} characters: {label!r}")
-        if not isinstance(color, str) or not RUNTIME_COLOR.fullmatch(color):
-            raise ValueError(f"runtime color must be #rrggbb: {color!r}")
-        self.id, self.label, self.color = id, label.strip(), color.lower()
+        if color is not None and (not isinstance(color, str) or not RUNTIME_COLOR.fullmatch(color)):
+            raise ValueError(f"runtime color must be #rrggbb or None: {color!r}")
+        self.id, self.label, self.color = id, label.strip(), color.lower() if color else None
         self.aliases = tuple(dict.fromkeys(str(a).strip().lower() for a in aliases if str(a).strip()))
         self.order = order
         self.roots, self.find, self.key, self.parse = roots, find, key, parse
+        self.source = source or id
+        self.feed_folder = None   # set on runtimes made from an open feed folder (sync_feeds)
 
     def discover(self):
         for root in self.roots():
@@ -2043,6 +2050,419 @@ register_runtime(Runtime(
     "deepseek", "DeepSeek", "#4d6bfe", aliases=("dsh",),
     roots=lambda: [DSH_DIR / "storages" / "session_projcache"], find=lambda root: [root],
     key=lambda unit, now: dsh_key(DSH_DIR, now), parse=_dsh_parse))
+
+
+# ---- Open feeds: any harness, wrapper script or CLI hook appears on the plane by appending JSON lines to
+# <FEED_DIR>/<runtime>/<session>.jsonl (feed.py writes them; docs/feed-format.md is the spec). The folder is
+# untrusted input: anything on the machine can write there. So: no symlinks, junctions or other reparse points
+# (root, folders or files), no hard-linked files, no UNC root; only a tail of each file, short lines, short strings;
+# and a path named inside an event is a label only: it is never opened, stat'ed or resolved. Only the fields the
+# spec lists are read, so message text (text, content, prompt, output, ...) is never kept.
+
+FEED_ACTIVE_S = 6 * 60               # open while the newest line is this recent (as Pi / Codex / Antigravity)
+FEED_RUNTIMES_MAX = 32               # runtime folders read, by name
+FEED_SCAN_MAX = 2000                 # directory entries looked at per folder
+FEED_SESSIONS_MAX = 64               # sessions read per runtime folder, newest first
+FEED_TAIL_BYTES = 1024 * 1024        # bytes read from the end of each session file
+FEED_LINE_MAX = 4096                 # a longer line is skipped
+FEED_LINES_MAX = 4000                # newest lines read per session file
+FEED_TEXT_MAX = 200                  # name, model, tool name, ref
+FEED_PATH_MAX = 1024                 # cwd, file path, target
+FEED_ROLE_MAX = 64
+FEED_META_MAX = 4096                 # runtime.json size
+FEED_ALIASES_MAX = 8
+FEED_SESSION_MAX = 128
+FEED_SESSION_ID = re.compile(r"[a-z0-9]+(?:[-_][a-z0-9]+)*")   # the runtime id rule, plus single underscores
+FEED_TYPES = ("session", "tool", "file", "ship", "end")
+FEED_FILE_OPS = {"read": "Read", "write": "Write", "edit": "Edit"}
+FEED_SHIP_KINDS = ("commit", "push", "pr")
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def _feed_root():
+    """FEED_DIR, or None when it is unset or a UNC / device path (reading it would reach out to another host)."""
+    if not FEED_DIR or str(FEED_DIR).startswith(("\\\\", "//")):
+        return None
+    return Path(FEED_DIR)
+
+
+def _plain(st):
+    """A real file or folder: not a symlink, a junction or any other reparse point."""
+    return not stat.S_ISLNK(st.st_mode) and not (getattr(st, "st_file_attributes", 0) & _REPARSE_POINT)
+
+
+def _plain_dir(path):
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return _plain(st) and stat.S_ISDIR(st.st_mode)
+
+
+def _feed_entries(folder, dirs):
+    """(name, mtime) of the plain folders (dirs=True) or files directly in folder; at most FEED_SCAN_MAX looked at."""
+    out = []
+    try:
+        with os.scandir(folder) as entries:
+            for i, entry in enumerate(entries):
+                if i >= FEED_SCAN_MAX:
+                    break
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if _plain(st) and (stat.S_ISDIR(st.st_mode) if dirs else stat.S_ISREG(st.st_mode)):
+                    out.append((entry.name, st.st_mtime))
+    except OSError:
+        return []
+    return out
+
+
+def _feed_open(path):
+    """(open binary file, its fstat) for a plain, single-link regular file, or None. The file is checked before
+    and after opening, so one swapped for a link in between is refused."""
+    try:
+        before = os.lstat(path)
+    except OSError:
+        return None
+    if not _plain(before) or not stat.S_ISREG(before.st_mode):
+        return None
+    try:
+        f = open(path, "rb")
+    except OSError:
+        return None
+    try:
+        after = os.fstat(f.fileno())
+        if (after.st_ino, after.st_dev) != (before.st_ino, before.st_dev) or after.st_nlink > 1 \
+                or not stat.S_ISREG(after.st_mode):
+            f.close()
+            return None
+    except OSError:
+        f.close()
+        return None
+    return f, after
+
+
+def _feed_text(value, cap=FEED_TEXT_MAX):
+    """A string field as plain text: control characters dropped, trimmed, capped; None for anything else."""
+    if not isinstance(value, str):
+        return None
+    value = _CONTROL.sub(" ", value[:cap * 2]).strip()[:cap].strip()
+    return value or None
+
+
+def _feed_session_ok(name):
+    return isinstance(name, str) and len(name) <= FEED_SESSION_MAX and bool(FEED_SESSION_ID.fullmatch(name))
+
+
+def _feed_time(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if math.isfinite(value) and value > 0 else None
+    if isinstance(value, str) and len(value) <= 64:
+        return _ts(value)
+    return None
+
+
+def _is_abs(path):
+    return os.path.isabs(path) or path.startswith(("\\\\", "//"))
+
+
+def _feed_path_key(path, cwd=None):
+    """The key _path_key gives a local file, worked out from the text alone: no resolve(), no stat()."""
+    raw = os.path.expanduser(path.strip())
+    if not _is_abs(raw) and cwd and _is_abs(cwd):
+        raw = os.path.join(os.path.expanduser(cwd), raw)
+    return os.path.normcase(os.path.normpath(raw))
+
+
+def _feed_doc_target(path, cwd=None):
+    """document_target for a path named in a feed, from the text alone: the shared area, a skill, or a file."""
+    key = _feed_path_key(path, cwd)
+    if SHARED_DIR:
+        root = Path(SHARED_DIR).resolve(strict=False)    # the configured folder, not one named by the feed
+        root_key = os.path.normcase(str(root)).rstrip("\\/")
+        if key == root_key or key.startswith(root_key + os.sep):
+            tail = key[len(root_key):].strip("\\/").replace("\\", "/")
+            name = root.name or "shared"
+            return {"id": "area:shared", "kind": "area", "label": name, "group": "shared:workflow",
+                    "groupLabel": "shared workflow", "space": "shared", "detail": name + ("/" + tail if tail else "")}
+    skill = _skill_name(path)
+    if skill:
+        return skill_target(skill)
+    p = Path(key)
+    parent = p.parent
+    return {"id": "doc:" + key.replace("\\", "/"), "kind": "doc", "label": p.name or key,
+            "group": "doc:" + os.path.normcase(str(parent)).replace("\\", "/"),
+            "groupLabel": parent.name or parent.as_posix()}
+
+
+def _feed_tool_targets(name, target, cwd):
+    """What one feed tool call touches, drawn as the other parsers draw it. target is a path or URL: a label."""
+    url = bool(target) and bool(re.match(r"https?://", target, re.IGNORECASE))
+    path = target if target and not url else None
+    if name in DOC_TOOLS:
+        group, glabel = tool_group(name)
+        primary = _feed_doc_target(path, cwd) if path else {"id": f"tool:{name}", "kind": "tool", "label": name,
+                                                            "group": group, "groupLabel": glabel}
+    elif name == "Skill" and target:
+        primary = skill_target(target)
+    elif name == "SendMessage":
+        primary = target_of(name, {"to": target or "agent"})
+    else:
+        primary = target_of(name, {})
+    return [primary, shared_type_target(name), _feed_doc_target(path, cwd) if path else None]
+
+
+def _feed_lines(path):
+    """([(at, type, line)] for the valid lines in the tail of a session file, its mtime), or None if it can't be
+    read safely. A line's time is never later than its file's mtime."""
+    opened = _feed_open(path)
+    if opened is None:
+        return None
+    f, st = opened
+    with f:
+        start = max(0, st.st_size - FEED_TAIL_BYTES)
+        f.seek(start)
+        data = f.read(FEED_TAIL_BYTES)
+    raw_lines = data.split(b"\n")
+    if start:
+        raw_lines = raw_lines[1:]          # a partial first line
+    rows = []
+    for raw in [line for line in raw_lines if line.strip()][-FEED_LINES_MAX:]:
+        if len(raw) > FEED_LINE_MAX:
+            continue
+        try:
+            entry = json.loads(raw.decode("utf-8"))
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(entry, dict) or isinstance(entry.get("v"), bool) or entry.get("v") != 1:
+            continue
+        at = _feed_time(entry.get("t"))
+        kind = entry.get("type")
+        if at is None or not isinstance(kind, str):
+            continue
+        rows.append((min(at, st.st_mtime), kind, entry))
+    return rows, st.st_mtime
+
+
+def parse_feed_file(path, runtime, label=None, now=None):
+    """One open-feed session (<FEED_DIR>/<runtime folder>/<session>.jsonl) as a bundle like parse_pi_file's.
+    runtime is the id its agents are drawn under; label names the runtime in an agent's fallback label."""
+    now = now or time.time()
+    path = Path(path)
+    read = _feed_lines(path)
+    if read is None:
+        return None
+    rows, _ = read
+    session = path.stem
+    agent = f"feed:{runtime}:{session}"
+    meta = {}
+    for _, kind, entry in rows:
+        if kind != "session":
+            continue
+        for field, cap in (("name", FEED_TEXT_MAX), ("model", FEED_TEXT_MAX), ("role", FEED_ROLE_MAX),
+                           ("cwd", FEED_PATH_MAX)):
+            value = _feed_text(entry.get(field), cap)
+            if value:
+                meta[field] = value
+        parent = entry.get("parent")
+        if _feed_session_ok(parent) and parent != session:
+            meta["parent"] = parent
+    cwd = meta.get("cwd")
+    nodes, edges, events, ships, ship_count = {}, {}, [], [], {}
+    first, newest, last_work, ended = None, 0.0, 0.0, False
+
+    def touch(targets, at, tool, detail):
+        unique = {}
+        for target in targets:
+            if target:
+                target.setdefault("space", "shared" if target.get("space") == "shared" else runtime)
+                unique[target["id"]] = target
+        for target in unique.values():
+            nodes[target["id"]] = {k: target[k] for k in ("kind", "label", "group", "groupLabel", "space")}
+            kind = target.get("edge", "call")
+            edge = edges.setdefault((agent, target["id"], kind), {"count": 0, "lastAt": 0.0})
+            edge["count"] += 1
+            edge["lastAt"] = max(edge["lastAt"], at)
+            events.append({"at": at, "src": agent, "dst": target["id"], "kind": kind, "tool": tool,
+                           "detail": (detail or target.get("detail") or "")[:160], "ms": None})
+
+    for at, kind, entry in rows:
+        if kind not in FEED_TYPES:
+            continue                       # unknown types are ignored
+        first = at if first is None else min(first, at)
+        newest = max(newest, at)
+        ended = kind == "end"              # a line after "end" means the session carried on
+        if kind == "tool":
+            name = _feed_text(entry.get("name"))
+            if not name:
+                continue
+            target = _feed_text(entry.get("target"), FEED_PATH_MAX)
+            touch(_feed_tool_targets(name, target, cwd), at, name, target)
+            last_work = max(last_work, at)
+        elif kind == "file":
+            path_text = _feed_text(entry.get("path"), FEED_PATH_MAX)
+            op = entry.get("op")
+            tool = FEED_FILE_OPS.get(op) if isinstance(op, str) else None
+            if not path_text or not tool:
+                continue
+            doc = _feed_doc_target(path_text, cwd)
+            touch([target_of(tool, {}) if tool == "Read" else doc, shared_type_target(tool), doc], at, tool, path_text)
+            last_work = max(last_work, at)
+        elif kind == "ship":
+            step = entry.get("kind")
+            if step not in FEED_SHIP_KINDS:
+                continue
+            ref = _feed_text(entry.get("ref"), FEED_TEXT_MAX)
+            url = ref if step == "pr" and ref and PR_URL.fullmatch(ref) else None
+            n = ship_count[(at, step)] = ship_count.get((at, step), 0) + 1
+            ok = entry.get("ok")
+            ships.append({"id": f"{agent}:{at:.3f}:{step}" + (str(n) if n > 1 else ""), "agent": agent, "at": at,
+                          "step": step, "ok": ok if isinstance(ok, bool) else True,
+                          "branch": None if url else _clip(ref), "remote": None, "url": url, "cwd": cwd,
+                          "folder": "doc:" + _feed_path_key(cwd).replace("\\", "/") if cwd and _is_abs(cwd) else None})
+    if first is None:
+        return {"agent": agent, "provider": runtime, "nodes": {}, "edges": {}, "open": {}}
+    is_open = now - newest <= FEED_ACTIVE_S and not ended
+    parent_id = f"feed:{runtime}:{meta['parent']}" if meta.get("parent") else None
+    if parent_id:
+        stub = f"{label or runtime} · {meta['parent'][-6:]}"
+        nodes.setdefault(parent_id, {"kind": "agent", "label": stub, "name": stub, "provider": runtime,
+                                     "domain": runtime, "space": runtime, "environment": "local", "feed": True,
+                                     "mtime": first, "open": False, "_parentStub": True})
+        edges[(parent_id, agent, "spawn")] = {"count": 1, "lastAt": first}
+    project = PurePath(cwd.replace("\\", "/")).name if cwd else ""
+    fallback = f"{label or runtime} · {project or 'session'} · {session[-6:]}"
+    working = is_open and now - last_work <= ACTIVE_S
+    nodes[agent] = {"kind": "subagent" if parent_id else "agent", "label": meta.get("name") or fallback,
+                    "name": meta.get("name") or fallback, "parent": parent_id, "provider": runtime,
+                    "domain": runtime, "space": runtime, "environment": "local", "feed": True,
+                    "state": "working" if working else "idle" if is_open else "done",
+                    "model": meta.get("model"), "role": meta.get("role"), "cwd": cwd, "mtime": newest,
+                    "open": is_open}
+    return {"agent": agent, "provider": runtime, "nodes": nodes, "edges": edges, "open": {},
+            "events": events[-EVENTS_PER_FILE:], "ships": ships[-SHIP_EVENTS_TOTAL:], "activity": newest,
+            "activeWindow": FEED_ACTIVE_S}
+
+
+def _feed_find(root):
+    """The newest FEED_SESSIONS_MAX plain <session>.jsonl files in a runtime folder that is itself plain."""
+    if not _plain_dir(root):
+        return []
+    files = [(name, mtime) for name, mtime in _feed_entries(root, dirs=False)
+             if name.endswith(".jsonl") and _feed_session_ok(name[:-len(".jsonl")])]
+    files.sort(key=lambda item: (-item[1], item[0]))
+    return [root / name for name, _ in files[:FEED_SESSIONS_MAX]]
+
+
+def _feed_key(path, now):
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if not _plain(st) or not stat.S_ISREG(st.st_mode) or now - st.st_mtime > GRAPH_WINDOW_S:
+        return DROP
+    # open and working change as time passes with no write, so both windows are part of the key
+    return st.st_mtime, st.st_size, now - st.st_mtime <= FEED_ACTIVE_S, now - st.st_mtime <= ACTIVE_S
+
+
+def _feed_parse(path, runtime, label, now):
+    try:
+        parsed = parse_feed_file(path, runtime, label, now)
+    except Exception:   # untrusted input: one bad file is forgotten, never fatal
+        return DROP
+    if parsed is None:
+        return None
+    return parsed if parsed["nodes"] else DROP
+
+
+def _feed_meta(folder):
+    """label / color / aliases from <folder>/runtime.json, each kept only when valid (else the default)."""
+    opened = _feed_open(folder / "runtime.json")
+    if opened is None:
+        return {}
+    f, st = opened
+    with f:
+        if st.st_size > FEED_META_MAX:
+            return {}
+        try:
+            data = json.loads(f.read(FEED_META_MAX).decode("utf-8"))
+        except (ValueError, RecursionError):
+            return {}
+    if not isinstance(data, dict):
+        return {}
+    meta = {}
+    label = _feed_text(data.get("label"), RUNTIME_LABEL_MAX)
+    if label:
+        meta["label"] = label
+    color = data.get("color")
+    if isinstance(color, str) and RUNTIME_COLOR.fullmatch(color):
+        meta["color"] = color
+    taken = {r.id for r in RUNTIMES} | {a for r in RUNTIMES if r.feed_folder is None for a in r.aliases}
+    aliases = data.get("aliases")
+    if isinstance(aliases, list):
+        meta["aliases"] = [a for a in (_feed_text(a, RUNTIME_LABEL_MAX) for a in aliases[:FEED_ALIASES_MAX])
+                           if a and a.lower() not in taken]
+    return meta
+
+
+def _feed_owner(folder):
+    """The runtime registered in code that a feed folder's sessions belong to: one with this id or alias, or the
+    id _canonical_domain folds the name into (so "openai" goes to codex). None: the folder is its own runtime."""
+    canonical = _canonical_domain(folder)
+    for r in RUNTIMES:
+        if r.feed_folder is None and (folder == r.id or folder in r.aliases or canonical == r.id):
+            return r
+    return None
+
+
+def _feed_runtime(folder, runtime_id, label, color=None, aliases=()):
+    def roots():
+        root = _feed_root()
+        return [root / folder] if root else []
+    runtime = Runtime(runtime_id, label, color, aliases=aliases, roots=roots, find=_feed_find, key=_feed_key,
+                      parse=lambda path, key, now, ctx: _feed_parse(path, runtime_id, label, now),
+                      source="feed:" + folder)
+    runtime.feed_folder = folder
+    return runtime
+
+
+def sync_feeds():
+    """Match the registry to the feed folders on disk. Each <FEED_DIR>/<id>/ becomes a registered Runtime, named and
+    coloured by its runtime.json; one whose folder went is unregistered. A folder named after a runtime registered
+    in code (an id or alias: "claude", "openai") adds its sessions under that runtime, keeping its label, colour and
+    logo, and never replaces it or its readers: those readers are returned, for refresh() to run as well.
+    At most FEED_RUNTIMES_MAX folders, by name."""
+    root = _feed_root()
+    folders = []
+    if root and _plain_dir(root):
+        folders = sorted(name for name, _ in _feed_entries(root, dirs=True)
+                         if len(name) <= RUNTIME_LABEL_MAX and RUNTIME_ID.fullmatch(name))[:FEED_RUNTIMES_MAX]
+    extra, kept = [], set()
+    for folder in folders:
+        try:
+            owner = _feed_owner(folder)
+            if owner:
+                extra.append(_feed_runtime(folder, owner.id, owner.label, owner.color))
+                continue
+            meta = _feed_meta(root / folder)
+            default = folder.replace("-", " ").title()
+            try:
+                runtime = _feed_runtime(folder, folder, meta.get("label") or default, meta.get("color"),
+                                        meta.get("aliases") or ())
+            except ValueError:
+                runtime = _feed_runtime(folder, folder, default)
+            register_runtime(runtime)
+            kept.add(folder)
+        except (OSError, ValueError):
+            continue
+    for runtime in list(RUNTIMES):
+        if runtime.feed_folder is not None and runtime.feed_folder not in kept:
+            unregister_runtime(runtime.id)
+    return extra
 
 
 def load_rosters(now, directory=None):
@@ -2130,7 +2550,7 @@ def apply_rosters(nodes, edges, rosters, now=None):
 
 class GraphStore:
     def __init__(self):
-        self._files = {}   # (runtime id, unit) -> (cache key, parsed); see Runtime
+        self._files = {}   # (runtime source, unit) -> (cache key, parsed); see Runtime
         self._lock = threading.Lock()
         self._snapshot = {"nodes": {}, "edges": [], "generatedAt": None, "ships": [], "jevs": [],
                           "runtimes": runtime_meta()}
@@ -2148,11 +2568,15 @@ class GraphStore:
 
     def refresh(self):
         now = time.time()
-        runtimes = list(RUNTIMES)
+        try:
+            extra = sync_feeds()   # registers a Runtime per open feed folder; returns readers for taken ids
+        except Exception:
+            extra = []             # a bad feed folder never stops the other runtimes
+        runtimes = list(RUNTIMES) + extra
         for runtime in runtimes:
             self._refresh_runtime(runtime, now)
-        ids = {r.id for r in runtimes}
-        for slot in [s for s in self._files if isinstance(s, tuple) and s[0] not in ids]:
+        sources = {r.source for r in runtimes}
+        for slot in [s for s in self._files if isinstance(s, tuple) and s[0] not in sources]:
             self._files.pop(slot, None)   # an unregistered runtime's units
         self._publish(now, load_rosters(now))
 
@@ -2161,7 +2585,7 @@ class GraphStore:
         seen, ctx = set(), {}
         for unit in runtime.discover():
             seen.add(unit)
-            slot = (runtime.id, unit)
+            slot = (runtime.source, unit)
             key = runtime.key(unit, now)
             if key is None:
                 continue
@@ -2176,7 +2600,7 @@ class GraphStore:
                 self._files.pop(slot, None)
             elif parsed is not None:
                 self._files[slot] = (key, parsed)
-        for slot in [s for s in self._files if isinstance(s, tuple) and s[0] == runtime.id and s[1] not in seen]:
+        for slot in [s for s in self._files if isinstance(s, tuple) and s[0] == runtime.source and s[1] not in seen]:
             self._files.pop(slot, None)
 
     def _publish(self, now, rosters=()):
