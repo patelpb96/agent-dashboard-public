@@ -18,6 +18,8 @@ import feed
 import graph
 import metrics
 
+CODED = [r.id for r in graph.RUNTIMES]   # runtimes registered in code, in order
+
 HERE = Path(__file__).resolve().parent
 SECRET = "SECRET-MESSAGE-TEXT-7f3a"   # never allowed anywhere in the payload
 
@@ -125,7 +127,7 @@ class FeedTest(unittest.TestCase):
         self.write("openai", "hook-2", [{"type": "tool", "name": "Grep"}])   # an alias goes to its runtime
         snap = self.snap()
         self.assertIs(next(r for r in graph.RUNTIMES if r.id == "claude"), claude)
-        self.assertEqual([r["id"] for r in snap["runtimes"]], ["claude", "codex", "pi", "antigravity", "deepseek"])
+        self.assertEqual([r["id"] for r in snap["runtimes"]], CODED)
         self.assertEqual(snap["runtimes"][0]["label"], "Claude")
         self.assertEqual(snap["nodes"]["feed:claude:hook-1"]["domain"], "claude")
         self.assertEqual(snap["nodes"]["feed:codex:hook-2"]["domain"], "codex")
@@ -222,7 +224,7 @@ class FeedTest(unittest.TestCase):
             os.utime(path, (self.now - 100 + i, self.now - 100 + i))
         with mock.patch.object(graph, "FEED_RUNTIMES_MAX", 2), mock.patch.object(graph, "FEED_SESSIONS_MAX", 2):
             snap = self.snap()
-        self.assertEqual([r["id"] for r in snap["runtimes"]][5:], ["rt0", "rt1"])
+        self.assertEqual([r["id"] for r in snap["runtimes"]][len(CODED):], ["rt0", "rt1"])
         self.assertEqual(sorted(n for n in snap["nodes"] if n.startswith("feed:rt0:")),
                          ["feed:rt0:s1", "feed:rt0:s4x"])   # the two newest
 

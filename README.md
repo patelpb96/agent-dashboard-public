@@ -59,6 +59,10 @@ biggest groups; hovering a node or a group always names it.
   | Pi | `~/.pi/agent/sessions` |
   | Google Antigravity CLI (Gemini) | `~/.gemini/antigravity-cli/conversations` |
   | DeepSeek Harness | `~/.dsh/storages/session_projcache/sessions` (the Harness's own per-Session JSON projection) |
+  | Anything else | `~/.agent-dashboard/feeds`: any harness, wrapper script or hook can write an [open feed](docs/feed-format.md) |
+
+  To add your own agent or harness, read [docs/adding-a-runtime.md](docs/adding-a-runtime.md). Usually that is a
+  few `python feed.py ...` calls from its hooks, with no dashboard code.
 - Optional: the `claude` CLI on `PATH`, for the live log view and for `newsroom.py` live runs
 
 ## Install

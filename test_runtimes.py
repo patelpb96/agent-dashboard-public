@@ -13,7 +13,8 @@ from unittest import mock
 import graph
 import metrics
 
-BUILTIN = ["claude", "codex", "pi", "antigravity", "deepseek"]
+# The runtimes registered in code (the five built-ins, plus any native adapter added since), in order.
+BUILTIN = [r.id for r in graph.RUNTIMES]
 
 
 def parse_fake(path):
