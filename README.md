@@ -221,17 +221,17 @@ Members then install it with the `git clone` command above, and update with `git
 | File | What it is |
 |---|---|
 | `server.py` | HTTP server and JSON API (`/api/jobs`, `/api/graph`, `/api/flow`, `/api/waits`, `/api/logs`) |
-| `graph.py` | Builds the agent graph from the transcripts |
+| `graph.py` | Builds the agent graph from the transcripts. Each runtime is one registered `Runtime` (where its data is, how to find, key and parse it, its label and colour); see its docstring to add one |
 | `metrics.py` | Token, cost and model usage |
 | `waits.py` | How long agents have been waiting on you |
 | `runstate.py` | Records that the server is running, and why it last stopped (`--status`) |
 | `paths.py` | Every folder the dashboard reads, plus the environment overrides |
 | `index.html`, `plane.js` | The page and the 3D view |
 | `jev.js` | The Jev circuit's cue rules (pure; tested with `node --test`) |
-| `filters.js` | The filter bar's rules and the cube projection (pure; tested with `node --test`) |
+| `filters.js` | The filter bar's rules, the runtime names and colours `/api/graph` sends, and the cube projection (pure; tested with `node --test`) |
 | `newsroom.py` | Demo workload |
 | `test_*.py` | Unit tests (`python -m unittest discover -p "test_*.py"`) |
-| `jev.test.js`, `filters.test.js` | Tests for `jev.js` and `filters.js` (`node --test`, Node 18 or newer) |
+| `jev.test.js`, `filters.test.js`, `runtimes.test.js` | Tests for `jev.js` and `filters.js` (`node --test`, Node 18 or newer) |
 
 ## License
 

@@ -296,8 +296,10 @@ def graph_payload():
     # ships: newest commits, pushes and PRs; the page beams on new ones and lists them
     # jevs: newest Jev calls (lifecycle and bounded outcome); the page animates new ones
     # activeWindow: how recent a call must be to count as in use (the page's "Active" tools and files)
+    # runtimes: every registered runtime's id, label, colour, aliases and order (graph.Runtime), for the page
     return {"generatedAt": snap["generatedAt"], "nodes": nodes, "edges": snap["edges"],
-            "ships": snap.get("ships", []), "jevs": snap.get("jevs", []), "activeWindow": ACTIVE_S}
+            "ships": snap.get("ships", []), "jevs": snap.get("jevs", []), "activeWindow": ACTIVE_S,
+            "runtimes": snap.get("runtimes", [])}
 
 
 def waits_payload():

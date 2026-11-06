@@ -7,31 +7,120 @@
 //     pulsing, or was last used within the server's activity window (graph.py ACTIVE_S, sent as activeWindow);
 //     "none" shows agents only. Ids in `keep` (the Jev node while a Jev cue is showing) are always shown.
 //   * Layout: "sphere" (three concentric spheres) or "cube" (the same strata on three nested cubes).
+//   * Runtimes: names, aliases and order come from the server's "runtimes" list (useRuntimes), with the built-in
+//     tables below as the fallback; a runtime the page has no entry for gets a hashed colour and a free direction.
 (function (root) {
   const RESOURCE_MODES = ["all", "active", "none"];
   const LAYOUTS = ["sphere", "cube"];
   const ACTIVE_WINDOW_S = 120;   // graph.py ACTIVE_S; used only when a payload does not say
   const MAX_LIST = 200, MAX_TEXT = 200;   // bounds on what a saved view may hold
 
+  // The built-in runtimes: the fallback when the server sends no "runtimes" (an older server). graph.py's
+  // registered Runtimes send the same values in /api/graph, and those win when present.
   const DOMAIN_ALIASES = { "claude-code": "claude", claude_code: "claude", "claude code": "claude", anthropic: "claude",
     "codex-cli": "codex", codex_cli: "codex", openai: "codex", gpt: "codex",   // one "GPT" runtime
     "antigravity-cli": "antigravity", agy: "antigravity", google: "antigravity", dsh: "deepseek" };
   const RUNTIME_NAMES = { claude: "Claude", codex: "GPT", pi: "Pi", antigravity: "Google", deepseek: "DeepSeek" };
   const RUNTIME_ORDER = ["claude", "codex", "pi", "antigravity", "deepseek"];
+  const RUNTIME_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;   // graph.py RUNTIME_ID
+  const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+  const MAX_LABEL = 40;
+
+  // Runtimes the server described ({id, label, color, aliases, order}), checked; null: use the built-in tables.
+  let served = null;
 
   const isAgent = n => !!n && (n.kind === "agent" || n.kind === "subagent");
+
+  // Plain text only: no control characters, trimmed, capped. (The page still puts it in the DOM as text, never HTML.)
+  function cleanText(value, max) {
+    if (typeof value !== "string") return "";
+    return value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
+  }
+
+  // Take the server's runtime list (payload.runtimes). Anything that is not an array, or is empty, goes back to the
+  // built-in tables. Bad entries are skipped; an id must look like graph.py's ids, a colour must be #rrggbb.
+  // Returns the list kept, in order.
+  function useRuntimes(list) {
+    if (!Array.isArray(list) || !list.length) { served = null; return []; }
+    const byId = new Map();
+    for (const r of list.slice(0, MAX_LIST)) {
+      if (!r || typeof r !== "object") continue;
+      const id = typeof r.id === "string" ? r.id.toLowerCase() : "";
+      if (!RUNTIME_ID.test(id) || id.length > MAX_LABEL || byId.has(id)) continue;
+      byId.set(id, {
+        id,
+        label: cleanText(r.label, MAX_LABEL) || id,
+        color: typeof r.color === "string" && HEX_COLOR.test(r.color) ? r.color.toLowerCase() : null,
+        order: Number.isFinite(r.order) ? r.order : Infinity,
+        aliases: cleanList(r.aliases).map(a => a.toLowerCase().slice(0, MAX_LABEL)),
+      });
+    }
+    if (!byId.size) { served = null; return []; }
+    const ordered = [...byId.values()].sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
+    const aliases = new Map();
+    for (const r of ordered) for (const a of r.aliases) if (!byId.has(a) && !aliases.has(a)) aliases.set(a, r.id);
+    served = { byId, aliases, order: ordered.map(r => r.id) };
+    return ordered.map(r => ({ ...r, aliases: [...r.aliases] }));
+  }
 
   // The runtime a node belongs to, as plane.js keys its domains and colours.
   function canonicalDomain(raw) {
     const key = String(raw || "other").toLowerCase();
+    if (served) {
+      if (served.byId.has(key)) return key;
+      if (served.aliases.has(key)) return served.aliases.get(key);
+    }
     return DOMAIN_ALIASES[key] || key;
   }
   const domainOfNode = n => canonicalDomain(n.domain || n.provider || "other");
 
-  // The user's names for the runtimes: Claude / GPT / Pi / Google; anything else in title case.
+  // The user's names for the runtimes: the server's label, else Claude / GPT / Pi / Google / DeepSeek; anything else
+  // in title case.
   function runtimeName(domain) {
     const d = canonicalDomain(domain);
+    const info = served && served.byId.get(d);
+    if (info) return info.label;
     return RUNTIME_NAMES[d] || d.replace(/[-_]+/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+  }
+
+  // The server's entry for a runtime ({id, label, color, order, aliases}), or null (no metadata, or not listed).
+  function servedRuntime(domain) {
+    const info = served && served.byId.get(canonicalDomain(domain));
+    return info ? { ...info, aliases: [...info.aliases] } : null;
+  }
+
+  // One of the five runtimes this page has a logo and a fixed spot for.
+  function builtinRuntime(domain) { return RUNTIME_ORDER.includes(canonicalDomain(domain)); }
+
+  // A runtime the server lists that this page has no entry of its own for: it gets the plain glyph.
+  function extraRuntime(domain) { return !!servedRuntime(domain) && !builtinRuntime(domain); }
+
+  // A steady colour for a runtime with none given: a hue hashed from its id, as #rrggbb.
+  function hashColor(id) {
+    let h = 2166136261;
+    for (const ch of String(id)) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
+    const hue = (h >>> 0) % 360, s = 0.55, l = 0.62;
+    const k = n => (n + hue / 30) % 12, a = s * Math.min(l, 1 - l);
+    const f = n => Math.round(255 * (l - a * Math.max(-1, Math.min(k(n) - 3, 9 - k(n), 1))));
+    return "#" + [f(0), f(8), f(4)].map(v => v.toString(16).padStart(2, "0")).join("");
+  }
+
+  // A unit direction for a runtime with no fixed spot: of a fixed spread of candidates, the one farthest (by angle)
+  // from every direction in `taken` (the five fixed ones and any already handed out). Deterministic.
+  function freeDirection(taken) {
+    const dirs = (taken || []).map(v => {
+      const d = Math.hypot(v[0], v[1], v[2]) || 1;
+      return [v[0] / d, v[1] / d, v[2] / d];
+    });
+    const N = 96, golden = Math.PI * (3 - Math.sqrt(5));
+    let best = null, bestDot = Infinity;
+    for (let i = 0; i < N; i++) {
+      const y = 1 - 2 * (i + 0.5) / N, r = Math.sqrt(1 - y * y), t = i * golden;
+      const c = [Math.cos(t) * r, y, Math.sin(t) * r];
+      const nearest = dirs.reduce((m, d) => Math.max(m, c[0] * d[0] + c[1] * d[1] + c[2] * d[2]), -Infinity);
+      if (nearest < bestDot - 1e-9) { bestDot = nearest; best = c; }
+    }
+    return best;
   }
 
   function modelKey(n) { return `${domainOfNode(n)}|${String(n.model || "")}`; }
@@ -49,7 +138,8 @@
       entry.models.set(key, model);
       byDomain.set(domain, entry);
     }
-    const rank = d => { const i = RUNTIME_ORDER.indexOf(d); return i < 0 ? RUNTIME_ORDER.length : i; };
+    const order = served ? [...served.order, ...RUNTIME_ORDER.filter(d => !served.byId.has(d))] : RUNTIME_ORDER;
+    const rank = d => { const i = order.indexOf(d); return i < 0 ? order.length : i; };
     return [...byDomain.values()]
       .sort((a, b) => rank(a.domain) - rank(b.domain) || a.domain.localeCompare(b.domain))
       .map(r => ({ ...r, models: [...r.models.values()].sort((a, b) => b.count - a.count || a.model.localeCompare(b.model)) }));
@@ -182,6 +272,7 @@
   }
 
   const api = { RESOURCE_MODES, LAYOUTS, ACTIVE_WINDOW_S, canonicalDomain, runtimeName, modelKey, runtimesPresent,
+    useRuntimes, servedRuntime, builtinRuntime, extraRuntime, hashColor, freeDirection,
     defaultView, normalizeView, parseView, serializeView, isDefaultView, filterGraph, visibleEdges, edgeRecent,
     cubePoint, cubeNormal, cubeEdges, pickLabels };
   if (root) root.PlaneFilters = api;

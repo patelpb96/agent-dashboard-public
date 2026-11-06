@@ -145,16 +145,29 @@
   }
 
   function domainLabel(domain) {
+    const info = F && F.servedRuntime(domain);   // the server's label for a runtime it reads
+    if (info) return info.label.toUpperCase();
     return ({ claude: "CLAUDE", claude_code: "CLAUDE", "claude-code": "CLAUDE",
       codex: "GPT", openai: "GPT", gpt: "GPT", pi: "PI", antigravity: "GOOGLE", deepseek: "DEEPSEEK",
       cloud: "CLOUD" })[domain] || String(domain).replace(/[-_]/g, " ").toUpperCase();
   }
 
-  function domainColor(domain) { return DOMAIN_COLORS[domain] || colors.accent || "#8ba8ff"; }
+  const hashedColors = new Map();   // runtime -> colour hashed from its id, for runtimes with no colour of their own
+  function domainColor(domain) {
+    const info = F && F.servedRuntime(domain);
+    if (info && info.color && info.id === domain) return info.color;   // the server's colour for its runtime
+    if (DOMAIN_COLORS[domain]) return DOMAIN_COLORS[domain];          // built in, and the older spellings
+    if (info && info.color) return info.color;                         // another spelling of a served runtime
+    if (!F) return colors.accent || "#8ba8ff";
+    if (!hashedColors.has(domain)) hashedColors.set(domain, F.hashColor(domain));
+    return hashedColors.get(domain);
+  }
 
   function agentBrand(n) {
     const model = String(n.model || "").toLowerCase();
     const domain = domainOf(n), provider = String(n.provider || "").toLowerCase();
+    // A runtime the server reads but this page has no logo for: a plain glyph, whatever its model.
+    if (F && F.extraRuntime(domain)) return "runtime:" + domain;
     // A Codex runtime keeps its Codex mark even when its model is from the GPT family.
     if (domain === "codex" || provider.includes("codex")) return "codex";
     if (/gemini|argon|google/.test(model) || ["google", "antigravity"].includes(domain) || provider === "google") return "google";
@@ -198,6 +211,18 @@
       target.closePath();
       target.fillStyle = onNode ? "#fff" : "#d97757";
       target.fill();
+    } else if (String(brand).startsWith("runtime:")) {
+      // A runtime with no logo here: a square frame around its name's initial.
+      const id = String(brand).slice("runtime:".length), side = size * 0.84;
+      const name = F ? F.runtimeName(id) : id;
+      target.strokeStyle = white;
+      target.lineWidth = Math.max(1, size * 0.09);
+      target.lineJoin = "miter";
+      target.strokeRect(-side / 2, -side / 2, side, side);
+      target.fillStyle = white;
+      target.font = `700 ${Math.max(7, size * 0.5)}px system-ui, sans-serif`;
+      target.textAlign = "center"; target.textBaseline = "middle";
+      target.fillText(name.replace(/[^a-z0-9]/gi, "").slice(0, 1).toUpperCase() || "?", 0, 0.5);
     } else if (brand === "pi") {
       target.fillStyle = white;
       target.font = `700 ${Math.max(8, size * 0.83)}px Georgia, serif`;
@@ -279,9 +304,14 @@
     };
     const sorted = [...new Set(domains)].sort();
     const sites = new Map();
+    // A runtime with no fixed spot takes the free direction farthest from the five fixed ones and from each other.
+    const taken = ["claude", "codex", "pi", "antigravity", "deepseek"].map(d => fixed[d]);
     sorted.forEach((domain, i) => {
       let v = fixed[domain];
-      if (!v) {
+      if (!v && F && F.freeDirection) {
+        v = F.freeDirection(taken);
+        taken.push(v);
+      } else if (!v) {
         const golden = Math.PI * (3 - Math.sqrt(5));
         const y = 1 - 2 * (i + 0.5) / Math.max(1, sorted.length);
         const r = Math.sqrt(1 - y * y);
@@ -563,6 +593,7 @@
   }
 
   function applyGraph(raw) {
+    if (F && F.useRuntimes) F.useRuntimes(raw.runtimes);   // labels, colours, aliases, order; absent: built-in tables
     const data = splitClosed(raw);
     placeResourcesByUsage(data);
     renderClosed(data.closed);
@@ -674,7 +705,7 @@
     if (!filterBar || !F) return;
     const agents = [...nodes.values()].filter(n => !n.gone && isAgent(n));
     const runtimes = F.runtimesPresent(agents);
-    const key = JSON.stringify([runtimes.map(r => [r.domain, r.count, r.models.map(m => [m.key, m.count])]), viewState]);
+    const key = JSON.stringify([runtimes.map(r => [r.domain, r.name, r.count, r.models.map(m => [m.key, m.count])]), viewState]);
     filterBar.count.textContent = `showing ${filterCount.count} of ${filterCount.total}`;
     filterBar.count.title = `${agents.filter(n => !n.filtered).length} of ${agents.length} agents shown`;
     filterBar.reset.disabled = F.isDefaultView(viewState);

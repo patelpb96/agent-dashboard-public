@@ -560,9 +560,11 @@ function updateRuntimeStatus(agents) {
     gpt: "GPT", pi: "Pi", antigravity: "Google", "antigravity-cli": "Google",
     deepseek: "DeepSeek", dsh: "DeepSeek" };
   const counts = new Map();   // keyed by the shown name, so Codex and OpenAI agents add up under one "GPT"
+  const F = window.PlaneFilters;   // knows the runtimes the server listed (their labels); this table is the fallback
   for (const agent of agents) {
     const domain = String(agent.domain || agent.provider || "other").toLowerCase();
-    const name = labels[domain] || domain;
+    const served = F && F.servedRuntime ? F.servedRuntime(domain) : null;
+    const name = (served && served.label) || labels[domain] || domain;
     counts.set(name, (counts.get(name) || 0) + 1);
   }
   const domains = [...counts].sort(([a], [b]) => a.localeCompare(b))

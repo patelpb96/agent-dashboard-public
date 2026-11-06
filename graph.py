@@ -23,6 +23,10 @@ agents mark the shared files and tools they use as cloud resources in the graph.
 
 Only transcripts changed in the last GRAPH_WINDOW_S are read, and each file is
 re-parsed only when its (mtime, size) changes, like metrics.py.
+
+Each agent runtime (Claude Code, Codex, Pi, Antigravity, DeepSeek Harness) is one
+registered Runtime: where its data is, how to find, key and parse it, and its
+label, colour and aliases for the page. See Runtime to add one.
 """
 import hashlib
 import json
@@ -1894,6 +1898,153 @@ def parse_dsh(root=None, now=None):
             "activeWindow": DSH_ACTIVE_S}
 
 
+# ---- Runtimes: every agent runtime the graph reads is one registered Runtime ----------------------------------
+
+DROP = object()   # from Runtime.key or Runtime.parse: forget the unit's cached parse
+RUNTIME_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")   # what _canonical_domain leaves unchanged
+RUNTIME_COLOR = re.compile(r"#[0-9a-fA-F]{6}")
+RUNTIME_LABEL_MAX = 40
+
+
+def file_key(path, now):
+    """The default cache key: a file's (mtime, size). None when it can't be read right now (the cached parse
+    stays), DROP once it is older than GRAPH_WINDOW_S."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if now - st.st_mtime > GRAPH_WINDOW_S:
+        return DROP
+    return (st.st_mtime, st.st_size)
+
+
+class Runtime:
+    """One agent runtime the graph reads. Adding a runtime is one register_runtime() call, for example:
+
+        register_runtime(Runtime(
+            "opencode", "OpenCode", "#7bd88f", aliases=("open-code",),
+            roots=lambda: [OPENCODE_DIR],                     # read at call time: env overrides and test patches apply
+            find=lambda root: root.rglob("*.jsonl"),           # its units under one root that is a directory
+            parse=lambda path, key, now, ctx: parse_opencode_file(path, now)))
+
+    parse returns the same bundle as parse_file ({"nodes", "edges", "open", and optionally "events", "ships",
+    "jevs"}), with "provider"/"domain" = the runtime's id on its agent nodes. Nothing else changes: refresh() reads
+    every registered runtime, /api/graph lists it under "runtimes", and the page takes its label, colour, aliases
+    and order from there. An id the page has no logo for gets a colour hashed from the id, a plain glyph and a free
+    spot on the agent sphere.
+
+    Each refresh, for each runtime in order:
+      units:  find(root) for every root in roots() that is a directory. A unit is any hashable value, usually a
+              file's Path; a runtime read as one whole (DeepSeek Harness) has a single unit.
+      key(unit, now): its cache key; the unit is parsed again only when the key changes. None: can't be read right
+              now, keep what is cached. DROP: outside the window, forget it. Default: file_key.
+      parse(unit, key, now, ctx): the bundle. None keeps the older cached parse; DROP forgets it. ctx is a dict
+              shared by one pass over this runtime, for a side table loaded at most once and only when something
+              is parsed (Antigravity's conversation summaries).
+    A cached unit that find() did not return this pass is dropped.
+
+    id is the canonical runtime key (lowercase letters, digits, single hyphens); aliases are other spellings of
+    it the page folds into it (provider names, roster domains); color is #rrggbb; order sorts the filter chips
+    (default: registration order).
+    """
+
+    def __init__(self, id, label, color, *, roots, find, parse, key=file_key, aliases=(), order=None):
+        if not isinstance(id, str) or not RUNTIME_ID.fullmatch(id):
+            raise ValueError(f"runtime id must be lowercase letters, digits and single hyphens: {id!r}")
+        if not isinstance(label, str) or not label.strip() or len(label) > RUNTIME_LABEL_MAX:
+            raise ValueError(f"runtime label must be 1 to {RUNTIME_LABEL_MAX} characters: {label!r}")
+        if not isinstance(color, str) or not RUNTIME_COLOR.fullmatch(color):
+            raise ValueError(f"runtime color must be #rrggbb: {color!r}")
+        self.id, self.label, self.color = id, label.strip(), color.lower()
+        self.aliases = tuple(dict.fromkeys(str(a).strip().lower() for a in aliases if str(a).strip()))
+        self.order = order
+        self.roots, self.find, self.key, self.parse = roots, find, key, parse
+
+    def discover(self):
+        for root in self.roots():
+            if root is not None and Path(root).is_dir():
+                yield from self.find(Path(root))
+
+    def meta(self):
+        return {"id": self.id, "label": self.label, "color": self.color, "aliases": list(self.aliases),
+                "order": self.order}
+
+
+RUNTIMES = []   # registered Runtimes, in registration order
+
+
+def register_runtime(runtime):
+    """Add a runtime, or replace the one with the same id (keeping its place). Returns it."""
+    for i, old in enumerate(RUNTIMES):
+        if old.id == runtime.id:
+            if runtime.order is None:
+                runtime.order = old.order
+            RUNTIMES[i] = runtime
+            return runtime
+    if runtime.order is None:
+        runtime.order = len(RUNTIMES)
+    RUNTIMES.append(runtime)
+    return runtime
+
+
+def unregister_runtime(runtime_id):
+    """Remove a runtime by id (its cached units are dropped by the GraphStore's next refresh)."""
+    RUNTIMES[:] = [r for r in RUNTIMES if r.id != runtime_id]
+
+
+def runtime_meta():
+    """What /api/graph sends as "runtimes": [{id, label, color, aliases, order}], in order."""
+    return [r.meta() for r in sorted(RUNTIMES, key=lambda r: r.order)]
+
+
+def _antigravity_key(path, now):
+    try:
+        stats = [p.stat() for p in (path, path.with_name(path.name + "-wal")) if p.exists()]
+    except OSError:
+        return None
+    newest = max((st.st_mtime for st in stats), default=0.0)
+    if now - newest > GRAPH_WINDOW_S:
+        return DROP
+    # the presence lock and the "recent" window change with no write to the database, so both are part of the key
+    return (tuple((st.st_mtime, st.st_size) for st in stats), antigravity_present(path.stem),
+            now - newest <= ANTIGRAVITY_ACTIVE_S)
+
+
+def _antigravity_parse(path, key, now, ctx):
+    if "summaries" not in ctx:
+        ctx["summaries"] = antigravity_summaries()   # once per pass, and only when a conversation changed
+    return parse_antigravity_db(path, now, ctx["summaries"].get(path.stem), key[1])
+
+
+def _dsh_parse(unit, key, now, ctx):
+    parsed = parse_dsh(DSH_DIR, now)   # one parse over the whole root, cached as one unit
+    return parsed if parsed["nodes"] else DROP
+
+
+# The built-in runtimes. Roots are lambdas so the paths are read at refresh time (tests patch graph.PROJECTS_DIR).
+register_runtime(Runtime(
+    "claude", "Claude", "#e9a960", aliases=("claude-code", "claude_code", "claude code", "anthropic"),
+    roots=lambda: [PROJECTS_DIR],
+    find=lambda root: list(root.glob("*/*.jsonl")) + list(root.glob("*/*/subagents/*.jsonl")),
+    parse=lambda path, key, now, ctx: parse_file(path)))
+register_runtime(Runtime(
+    "codex", "GPT", "#9a88ff", aliases=("codex-cli", "codex_cli", "openai", "gpt"),
+    roots=lambda: [CODEX_SESSIONS_DIR], find=lambda root: root.rglob("rollout-*.jsonl"),
+    parse=lambda path, key, now, ctx: parse_codex_file(path, now)))
+register_runtime(Runtime(
+    "pi", "Pi", "#62d1c8",
+    roots=lambda: [PI_SESSIONS_DIR], find=lambda root: root.rglob("*.jsonl"),
+    parse=lambda path, key, now, ctx: parse_pi_file(path, now)))
+register_runtime(Runtime(
+    "antigravity", "Google", "#ef7fae", aliases=("antigravity-cli", "agy", "google"),
+    roots=lambda: [ANTIGRAVITY_DIR / "conversations"], find=lambda root: root.glob("*.db"),
+    key=_antigravity_key, parse=_antigravity_parse))
+register_runtime(Runtime(
+    "deepseek", "DeepSeek", "#4d6bfe", aliases=("dsh",),
+    roots=lambda: [DSH_DIR / "storages" / "session_projcache"], find=lambda root: [root],
+    key=lambda unit, now: dsh_key(DSH_DIR, now), parse=_dsh_parse))
+
+
 def load_rosters(now, directory=None):
     """Roster files touched within the graph window, newest last."""
     directory = directory or ROSTER_DIR
@@ -1979,9 +2130,10 @@ def apply_rosters(nodes, edges, rosters, now=None):
 
 class GraphStore:
     def __init__(self):
-        self._files = {}   # path -> ((mtime, size), parsed)
+        self._files = {}   # (runtime id, unit) -> (cache key, parsed); see Runtime
         self._lock = threading.Lock()
-        self._snapshot = {"nodes": {}, "edges": [], "generatedAt": None, "ships": [], "jevs": []}
+        self._snapshot = {"nodes": {}, "edges": [], "generatedAt": None, "ships": [], "jevs": [],
+                          "runtimes": runtime_meta()}
         self._events = []
         self._ships = []    # newest first, at most SHIP_EVENTS_TOTAL
         threading.Thread(target=self._loop, daemon=True).start()
@@ -1996,101 +2148,36 @@ class GraphStore:
 
     def refresh(self):
         now = time.time()
-        seen = set()
-        if PROJECTS_DIR.is_dir():
-            for path in list(PROJECTS_DIR.glob("*/*.jsonl")) + list(PROJECTS_DIR.glob("*/*/subagents/*.jsonl")):
-                seen.add(path)
-                try:
-                    st = path.stat()
-                except OSError:
-                    continue
-                if now - st.st_mtime > GRAPH_WINDOW_S:
-                    self._files.pop(path, None)
-                    continue
-                key = (st.st_mtime, st.st_size)
-                cached = self._files.get(path)
-                if cached and cached[0] == key:
-                    continue
-                parsed = parse_file(path)
-                if parsed is not None:
-                    self._files[path] = (key, parsed)
-        if CODEX_SESSIONS_DIR.is_dir():
-            for path in CODEX_SESSIONS_DIR.rglob("rollout-*.jsonl"):
-                seen.add(path)
-                try:
-                    st = path.stat()
-                except OSError:
-                    continue
-                if now - st.st_mtime > GRAPH_WINDOW_S:
-                    self._files.pop(path, None)
-                    continue
-                key = (st.st_mtime, st.st_size)
-                cached = self._files.get(path)
-                if cached and cached[0] == key:
-                    continue
-                parsed = parse_codex_file(path, now)
-                if parsed is not None:
-                    self._files[path] = (key, parsed)
-        if PI_SESSIONS_DIR.is_dir():
-            for path in PI_SESSIONS_DIR.rglob("*.jsonl"):
-                seen.add(path)
-                try:
-                    st = path.stat()
-                except OSError:
-                    continue
-                if now - st.st_mtime > GRAPH_WINDOW_S:
-                    self._files.pop(path, None)
-                    continue
-                key = (st.st_mtime, st.st_size)
-                cached = self._files.get(path)
-                if cached and cached[0] == key:
-                    continue
-                parsed = parse_pi_file(path, now)
-                if parsed is not None:
-                    self._files[path] = (key, parsed)
-        conversations = ANTIGRAVITY_DIR / "conversations"
-        if conversations.is_dir():
-            summaries = None
-            for path in conversations.glob("*.db"):
-                seen.add(path)
-                try:
-                    stats = [p.stat() for p in (path, path.with_name(path.name + "-wal")) if p.exists()]
-                except OSError:
-                    continue
-                newest = max((st.st_mtime for st in stats), default=0.0)
-                if now - newest > GRAPH_WINDOW_S:
-                    self._files.pop(path, None)
-                    continue
-                present = antigravity_present(path.stem)
-                # the presence lock and the "recent" window change with no write to the database,
-                # so both are part of the cache key
-                key = (tuple((st.st_mtime, st.st_size) for st in stats), present,
-                       now - newest <= ANTIGRAVITY_ACTIVE_S)
-                cached = self._files.get(path)
-                if cached and cached[0] == key:
-                    continue
-                if summaries is None:
-                    summaries = antigravity_summaries()
-                parsed = parse_antigravity_db(path, now, summaries.get(path.stem), present)
-                if parsed is not None:
-                    self._files[path] = (key, parsed)
-        dsh_cache = DSH_DIR / "storages" / "session_projcache"
-        if dsh_cache.is_dir():
-            key = dsh_key(DSH_DIR, now)
-            cached = self._files.get(dsh_cache)
-            if not cached or cached[0] != key:
-                parsed = parse_dsh(DSH_DIR, now)
-                if parsed["nodes"]:
-                    self._files[dsh_cache] = (key, parsed)
-                else:
-                    self._files.pop(dsh_cache, None)
-        else:
-            self._files.pop(dsh_cache, None)
-        for path in list(self._files):
-            if (PROJECTS_DIR in path.parents or CODEX_SESSIONS_DIR in path.parents or
-                    PI_SESSIONS_DIR in path.parents or conversations in path.parents) and path not in seen:
-                self._files.pop(path, None)
+        runtimes = list(RUNTIMES)
+        for runtime in runtimes:
+            self._refresh_runtime(runtime, now)
+        ids = {r.id for r in runtimes}
+        for slot in [s for s in self._files if isinstance(s, tuple) and s[0] not in ids]:
+            self._files.pop(slot, None)   # an unregistered runtime's units
         self._publish(now, load_rosters(now))
+
+    def _refresh_runtime(self, runtime, now):
+        """Re-parse this runtime's units whose cache key changed; drop the ones it no longer has."""
+        seen, ctx = set(), {}
+        for unit in runtime.discover():
+            seen.add(unit)
+            slot = (runtime.id, unit)
+            key = runtime.key(unit, now)
+            if key is None:
+                continue
+            if key is DROP:
+                self._files.pop(slot, None)
+                continue
+            cached = self._files.get(slot)
+            if cached and cached[0] == key:
+                continue
+            parsed = runtime.parse(unit, key, now, ctx)
+            if parsed is DROP:
+                self._files.pop(slot, None)
+            elif parsed is not None:
+                self._files[slot] = (key, parsed)
+        for slot in [s for s in self._files if isinstance(s, tuple) and s[0] == runtime.id and s[1] not in seen]:
+            self._files.pop(slot, None)
 
     def _publish(self, now, rosters=()):
         nodes, edges, events, ships = {}, {}, [], []
@@ -2181,6 +2268,7 @@ class GraphStore:
             "generatedAt": now,
             "ships": ships,
             "jevs": jevs,       # newest first; see jev_rows
+            "runtimes": runtime_meta(),   # [{id, label, color, aliases, order}]; see Runtime
         }
         with self._lock:
             self._snapshot = snapshot
