@@ -93,3 +93,28 @@ test("free directions stay clear of the fixed ones and of each other", () => {
     for (const w of handed.slice(0, i)) assert.ok(angle(v, w) > 0.6);
   }
 });
+
+test("ids that are Object.prototype names are plain unknown runtimes, never prototype members", () => {
+  const names = ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf", "isPrototypeOf"];
+  for (const served of [null, SERVED]) {
+    F.useRuntimes(served);
+    for (const name of names) {
+      const d = F.canonicalDomain(name);
+      assert.equal(typeof d, "string", name);
+      assert.equal(d, name.toLowerCase());
+      assert.equal(typeof F.runtimeName(name), "string");
+      assert.match(F.hashColor(d), /^#[0-9a-f]{6}$/);
+      assert.equal(F.servedRuntime(name), null);
+      assert.equal(F.own({ a: 1 }, name), undefined);
+    }
+    const nodes = names.map((name, i) => agent(`x${i}`, name));
+    const present = F.runtimesPresent(nodes);
+    assert.deepEqual(present.map(r => r.domain).sort(), names.map(n => n.toLowerCase()).sort());
+    const out = F.filterGraph(nodes, [], F.normalizeView({ hiddenRuntimes: ["constructor"] }), {});
+    assert.deepEqual([...out.shown].sort(), ["x1", "x2", "x3", "x4", "x5"]);
+  }
+  // the server refuses these ids, but a page may still be sent one (a roster's domain): it is skipped or kept as data
+  const kept = F.useRuntimes([{ id: "constructor", label: "C" }, { id: "claude", label: "Claude", aliases: ["constructor"] }]);
+  assert.deepEqual(kept.map(r => r.id).sort(), ["claude", "constructor"]);
+  assert.equal(F.canonicalDomain("constructor"), "constructor");
+});

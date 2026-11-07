@@ -59,7 +59,8 @@ class RuntimeRegistryTest(unittest.TestCase):
 
     def fake_runtime(self, **over):
         def parse(path, key, now, ctx):
-            self.parsed.append(path.name)
+            if threading.current_thread() is threading.main_thread():   # not test_server's background GraphStore
+                self.parsed.append(path.name)
             return parse_fake(path)
         args = dict(aliases=("fake-rt", "Fake RT"), roots=lambda: [self.fake_root],
                     find=lambda root: root.glob("*.jsonl"), parse=parse)

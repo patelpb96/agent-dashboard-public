@@ -132,7 +132,7 @@ def _resolved(candidate):
         return os.path.normpath(text)
     try:
         return str(candidate.resolve(strict=False))
-    except OSError:
+    except (OSError, ValueError):   # ValueError: a NUL byte in the path
         return text
 
 
@@ -370,14 +370,28 @@ def target_of(name, inp):
             "groupLabel": glabel, "edge": "call"}
 
 
+# `scheme://user:password@host`: the user part of a URL is dropped from anything kept (a remote, a detail),
+# because a token pasted into a remote URL is a credential.
+# The scheme must start a run (not \b): with \b, every boundary inside `a.a.a...` started a match that scanned the
+# rest of the run, so a long dotted token was quadratic.
+URL_USERINFO = re.compile(r"(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://)[^/\s]*@",
+                          re.IGNORECASE)   # up to the last @ before the host
+
+
+def no_userinfo(text):
+    """text with every URL's user:password@ removed."""
+    return URL_USERINFO.sub(r"\1", text) if isinstance(text, str) and "@" in text else text
+
+
 def detail_of(inp):
-    """The one input field worth showing in a flow row: a command, path, query or URL."""
+    """The one input field worth showing in a flow row: a command, path, query or URL (its first line, at most
+    160 characters, with any URL credentials removed)."""
     inp = inp if isinstance(inp, dict) else {}
     for key in ("command", "cmd", "command_line", "file_path", "notebook_path", "path",
                 "filename", "query", "url", "pattern", "to", "description"):
         value = inp.get(key)
         if isinstance(value, str) and value:
-            return value.split("\n")[0][:160]
+            return no_userinfo(value.split("\n")[0])[:160]
     return ""
 
 
@@ -389,16 +403,18 @@ SHELL_RUN_TOOLS = {"Bash", "PowerShell", "exec", "exec_command", "shell", "power
                    "pwsh"}
 SHELLS = {"bash", "sh", "zsh", "dash", "fish", "pwsh", "powershell", "cmd"}
 SHIP_TEXT_MAX = 200         # branch and remote names are shown as plain text; keep them short
+TITLE_MAX = 200             # a session title kept from a runtime's own files (Antigravity, DeepSeek Harness)
 # The only text from a transcript the page may turn into a link. ASCII only, so look-alike
 # letters cannot sneak into the owner or repo name.
 PR_URL = re.compile(r"^https://github\.com/[\w.-]+/[\w.-]+/pull/\d+", re.ASCII | re.MULTILINE)
 # `[main 1a2b3c4] message`, also `[main (root-commit) 1a2b3c4]` and `[detached HEAD 1a2b3c4]`
-COMMIT_LINE = re.compile(r"^\[([^\]\n]+?)(?: \(root-commit\))? [0-9a-f]{7,40}\] ", re.MULTILINE)
+COMMIT_LINE = re.compile(r"^\[([^\]\n]{1,200}?)(?: \(root-commit\))? [0-9a-f]{7,40}\] ", re.MULTILINE)
 # A pushed ref: ` * [new branch]  feature-x -> feature-x`, `   1a2b..3c4d  main -> main`, ` + a...b  x -> x`.
-# Rejected refs (`!`) are left out here and caught by the `! [rejected]` check.
-PUSH_REF = re.compile(r"^\s*(?:[+*=-]\s+)?(?:(?:\[[^\]\n]+\]|[0-9a-f]{4,40}\.\.\.?[0-9a-f]{4,40})\s+)?"
-                      r"(\S+)\s+->\s+(\S+)", re.MULTILINE)
-TRACKING = re.compile(r"branch '([^'\n]+)' set up to track", re.IGNORECASE)   # older git writes "Branch"
+# Rejected refs (`!`) are left out here and caught by the `! [rejected]` check. Blanks are [ \t], never \s: \s
+# spans newlines, which made a run of blank lines quadratic.
+PUSH_REF = re.compile(r"^[ \t]*(?:[+*=-][ \t]+)?(?:(?:\[[^\]\n]+\]|[0-9a-f]{4,40}\.\.\.?[0-9a-f]{4,40})[ \t]+)?"
+                      r"(\S+)[ \t]+->[ \t]+(\S+)", re.MULTILINE)
+TRACKING = re.compile(r"branch '([^'\n]{1,200})' set up to track", re.IGNORECASE)   # older git writes "Branch"
 EXIT_CODE = re.compile(r"(?:exit code|exited with code|exit_code\"?)[:\s]+(-?\d+)", re.IGNORECASE)
 REDIRECT = re.compile(r"^(?:\d*|&)(?:>>?|<)(.*)$")
 CD_COMMANDS = {"cd", "pushd", "chdir", "set-location", "sl"}
@@ -579,7 +595,8 @@ def command_of(name, inp, raw_text=""):
 
 
 def ship_events(agent, call_id, steps, text, at, failed=False):
-    """Ship events for one finished shell call: each step, judged from what the command printed."""
+    """Ship events for one finished shell call: each step, judged from what the command printed. The patterns
+    above are linear (no \\s across lines, bounded captures), so the whole output is read."""
     text = text or ""
     lower = text.casefold()
     bad = "error:" in lower or "fatal:" in lower
@@ -611,7 +628,7 @@ def ship_events(agent, call_id, steps, text, at, failed=False):
         name = kind if used[kind] == 1 else f"{kind}{used[kind]}"   # a second push in one line keeps its own id
         cwd = step["cwd"]
         events.append({"id": f"{agent}:{call_id}:{name}", "agent": agent, "at": at, "step": kind, "ok": ok,
-                       "branch": _clip(branch), "remote": _clip(step["remote"]), "url": url,
+                       "branch": _clip(branch), "remote": _clip(no_userinfo(step["remote"])), "url": url,
                        "cwd": cwd or None,
                        "folder": "doc:" + _path_key(cwd).replace("\\", "/") if cwd else None})
     return events
@@ -852,7 +869,7 @@ def subagent_label(path):
     """A subagent's description from its .meta.json, else its file name."""
     try:
         data = json.loads(path.with_name(path.stem + ".meta.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return path.stem
     return data.get("description") or data.get("agentType") or path.stem
 
@@ -892,7 +909,7 @@ def parse_file(path):
                     try:
                         if (json.loads(line).get("message") or {}).get("stop_reason") == "end_turn":
                             busy = False
-                    except ValueError:
+                    except (ValueError, RecursionError):
                         pass
                 # user lines matter only while a Jev call waits: a new turn means its result won't come
                 jev_turn = '"user"' in line and jev.busy()
@@ -900,7 +917,7 @@ def parse_file(path):
                     continue
                 try:
                     entry = json.loads(line)
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
                 if not isinstance(entry, dict):
                     continue
@@ -987,7 +1004,7 @@ def _codex_meta(path):
     try:
         with path.open("rb") as f:
             entry = json.loads(f.readline().decode("utf-8", errors="replace"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return {}
     if entry.get("type") != "session_meta":
         return {}
@@ -1005,7 +1022,7 @@ def _codex_args(payload):
             decoded = json.loads(raw)
             if isinstance(decoded, dict):
                 return decoded, raw
-        except ValueError:
+        except (ValueError, RecursionError):
             pass
         return {}, raw
     return {}, ""
@@ -1071,7 +1088,7 @@ def parse_codex_file(path, now=None):
         if isinstance(output, str):
             try:
                 decoded = json.loads(output)
-            except ValueError:
+            except (ValueError, RecursionError):
                 decoded = None
             if isinstance(decoded, dict):   # older Codex wraps the output and its exit code in JSON
                 metadata = decoded.get("metadata")
@@ -1100,7 +1117,7 @@ def parse_codex_file(path, now=None):
             for raw_line in f:
                 try:
                     entry = json.loads(raw_line.decode("utf-8", errors="replace"))
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
                 at = _ts(entry.get("timestamp")) or 0.0
                 if at:
@@ -1172,7 +1189,7 @@ def _pi_meta(path):
     try:
         with path.open("rb") as f:
             entry = json.loads(f.readline().decode("utf-8", errors="replace"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return {}
     return entry if isinstance(entry, dict) and entry.get("type") == "session" else {}
 
@@ -1185,12 +1202,14 @@ def parse_pi_file(path, now=None):
     cwd = meta.get("cwd") or ""
     project = Path(cwd).name if cwd else "Pi session"
     agent = "pi:" + str(session_id)
+    # parentSession is a path written in the transcript: it is read as text only (never opened or stat'ed). Pi names
+    # a session file <time>_<id>.jsonl, so the parent's id is the part after the last "_". The parent's own file,
+    # when it is read as a unit, replaces the stub drawn here.
     parent_session = meta.get("parentSession")
-    parent_meta = _pi_meta(Path(parent_session)) if isinstance(parent_session, str) and parent_session else {}
-    if parent_session and not parent_meta:
-        parent_stem = Path(parent_session).stem
-        parent_meta = {"id": parent_stem.rsplit("_", 1)[-1], "cwd": cwd}
-    parent_id = "pi:" + str(parent_meta.get("id")) if parent_session and parent_meta.get("id") else None
+    parent_meta = {}
+    if isinstance(parent_session, str) and parent_session.strip():
+        parent_meta = {"id": PurePath(parent_session.replace("\\", "/")).stem.rsplit("_", 1)[-1], "cwd": cwd}
+    parent_id = "pi:" + str(parent_meta.get("id")) if parent_meta.get("id") else None
     if parent_id == agent:
         parent_id = None
     environment = _environment(meta)
@@ -1276,7 +1295,7 @@ def parse_pi_file(path, now=None):
             for raw_line in f:
                 try:
                     entry = json.loads(raw_line.decode("utf-8", errors="replace"))
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
                 if not isinstance(entry, dict):
                     continue
@@ -1331,18 +1350,13 @@ def parse_pi_file(path, now=None):
     working = active and (bool(open_calls) or latest_role == "toolResult" or latest_stop in ("pending", "toolUse"))
     label = f"Pi · {project} · {str(session_id)[-6:]}"
     if parent_id:
-        parent_path = Path(parent_session)
-        try:
-            parent_mtime = parent_path.stat().st_mtime
-        except OSError:
-            parent_mtime = 0.0
         parent_cwd = parent_meta.get("cwd") or cwd
         parent_project = Path(parent_cwd).name if parent_cwd else "Pi session"
         parent_label = f"Pi · {parent_project} · {str(parent_meta.get('id'))[-6:]}"
+        # No mtime and not open: only the parent's own parsed file knows those, and it replaces this stub.
         nodes.setdefault(parent_id, {"kind": "agent", "label": parent_label, "name": parent_label, "provider": "pi",
-                                     "domain": "pi", "space": "pi", "environment": _environment(parent_meta),
-                                     "cwd": parent_cwd, "mtime": parent_mtime,
-                                     "open": bool(parent_mtime and now - parent_mtime <= PI_ACTIVE_S), "_parentStub": True})
+                                     "domain": "pi", "space": "pi", "environment": "local",
+                                     "cwd": parent_cwd, "open": False, "_parentStub": True})
         edges[(parent_id, agent, "spawn")] = {"count": 1, "lastAt": mtime}
     nodes[agent] = {"kind": "subagent" if parent_id else "agent", "label": label, "name": label,
                     "parent": parent_id, "provider": "pi", "domain": "pi", "space": "pi",
@@ -1438,9 +1452,28 @@ def _snake_keys(args):
     return out
 
 
-def _sqlite_ro(path):
-    """Read-only connection that never creates or changes the file (works while Antigravity writes)."""
-    return sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+ANTIGRAVITY_QUERY_S = 5   # a connection's queries are stopped after this long (a view can be made to run forever)
+
+
+def _sqlite_ro(path, deadline_s=None):
+    """Read-only connection that never creates or changes the file (works while Antigravity writes). Its queries
+    raise sqlite3.OperationalError once deadline_s (default ANTIGRAVITY_QUERY_S) has passed."""
+    con = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+    deadline = time.monotonic() + (ANTIGRAVITY_QUERY_S if deadline_s is None else deadline_s)
+    con.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 100)   # every 100 VM steps
+    return con
+
+
+def _sqlite_interrupted(exc):
+    """True when a query was stopped by _sqlite_ro's deadline."""
+    return getattr(exc, "sqlite_errorcode", None) == getattr(sqlite3, "SQLITE_INTERRUPT", 9) or \
+        "interrupt" in str(exc).lower()
+
+
+def _sqlite_tables(con, *names):
+    """True when every name is a real table: not a view, whose query the file's author chose."""
+    rows = con.execute("select name from sqlite_master where type = 'table'").fetchall()
+    return set(names) <= {row[0] for row in rows}
 
 
 def antigravity_summaries(root=None):
@@ -1453,6 +1486,8 @@ def antigravity_summaries(root=None):
     try:
         con = _sqlite_ro(path)
         try:
+            if not _sqlite_tables(con, "conversation_summaries"):
+                return {}
             con.row_factory = sqlite3.Row
             rows = con.execute(f"select {', '.join(cols)} from conversation_summaries").fetchall()
         finally:
@@ -1483,7 +1518,7 @@ def _workspace_path(uris):
     """The first workspace of a conversation as a local path ("file:///C:/Users/x" -> "C:/Users/x")."""
     try:
         first = (json.loads(uris) if isinstance(uris, str) else uris or [])[0]
-    except (ValueError, IndexError, TypeError, KeyError):
+    except (ValueError, IndexError, TypeError, KeyError, RecursionError):
         return ""
     if not isinstance(first, str) or not first.startswith("file://"):
         return ""
@@ -1537,6 +1572,8 @@ def parse_antigravity_db(path, now=None, summary=None, present=None):
     try:
         con = _sqlite_ro(path)
         try:
+            if not _sqlite_tables(con, "steps", "gen_metadata"):
+                return None
             rows = con.execute("select step_type, status, step_payload from steps order by idx desc limit ?",
                                (ANTIGRAVITY_STEP_ROWS,)).fetchall()[::-1]
             gen = con.execute("select data from gen_metadata order by idx desc limit 1").fetchone()
@@ -1544,6 +1581,12 @@ def parse_antigravity_db(path, now=None, summary=None, present=None):
             con.close()
         files = [p for p in (path, path.with_name(path.name + "-wal")) if p.exists()]
         mtime = max(p.stat().st_mtime for p in files)
+    except sqlite3.OperationalError as exc:
+        if _sqlite_interrupted(exc):
+            # Stopped at ANTIGRAVITY_QUERY_S: an empty bundle is cached under this file's key, so the slow query
+            # runs again only when the file changes, not every refresh.
+            return {"agent": agent, "provider": "antigravity", "nodes": {}, "edges": {}, "open": {}}
+        return None
     except (sqlite3.Error, OSError, ValueError):
         return None
     model = None
@@ -1565,7 +1608,7 @@ def parse_antigravity_db(path, now=None, summary=None, present=None):
             continue
         try:
             args = json.loads(_pb_text(_pb_get(call, 3)) or "{}")
-        except ValueError:
+        except (ValueError, RecursionError):
             args = {}
         result = _pb_text(_pb_get(payload, 140, 2, 1))
         add_call(name, args if isinstance(args, dict) else {}, at, end, _pb_text(_pb_get(call, 1)), status, result)
@@ -1579,7 +1622,7 @@ def parse_antigravity_db(path, now=None, summary=None, present=None):
         open_calls.clear()   # steps left "running" by a CLI that went quiet are not in flight
     running = str(summary.get("status") or "").endswith("_RUNNING") and bool(summary.get("not_fully_idle", 1))
     working = bool(is_open and recent and (open_calls or running or last_type == AG_STEP_TOOL))
-    title = str(summary.get("agent_name") or summary.get("title") or "").strip()
+    title = str(summary.get("agent_name") or summary.get("title") or "").strip()[:TITLE_MAX]
     label = f"Google · {project} · {conversation_id[-6:]}"
     if parent_id:
         nodes.setdefault(parent_id, {"kind": "agent", "label": f"Google · {project} · {parent_cid[-6:]}",
@@ -1607,7 +1650,7 @@ DSH_TURN_S = 30 * 60       # an open turn or a pending question keeps a quiet Se
 def _dsh_json(path):
     try:
         return json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
 
 
@@ -1681,10 +1724,35 @@ def _zstd_split(data, decode_one):
     return b"".join(out), start
 
 
+def node_executable():
+    """Absolute path of Node from the PATH entries only, or None. Unlike shutil.which on Windows, the current
+    folder is never searched (cmd's search order puts it first unless NoDefaultCurrentDirectoryInExePath is set),
+    nor is an empty, relative or "." entry, or one that is the current folder under another name. On Windows only
+    node.exe is taken: a .cmd/.bat would run through cmd.exe."""
+    try:
+        here = os.path.normcase(os.path.realpath(os.getcwd()))
+    except OSError:
+        here = None
+    names = ("node.exe",) if os.name == "nt" else ("node",)
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        entry = entry.strip().strip('"')
+        if not entry or not os.path.isabs(entry) or entry.startswith(("\\\\", "//")):
+            continue
+        try:
+            if here is not None and os.path.normcase(os.path.realpath(entry)) == here:
+                continue
+        except (OSError, ValueError):
+            continue
+        for name in names:
+            candidate = os.path.join(entry, name)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+    return None
+
+
 def _zstd_node(data):
-    import shutil
     import subprocess
-    node = shutil.which("node")
+    node = node_executable()
     if not node:
         raise OSError("node not found")
     done = subprocess.run([node, "-e", _NODE_ZSTD], input=data, capture_output=True, timeout=30,
@@ -1719,13 +1787,18 @@ def zstd_frames(data):
     return b"", 0
 
 
-def _dsh_clip(value):
+DSH_CLIP_DEPTH = 32   # deeper argument values are dropped (None), so clipping never recurses without end
+
+
+def _dsh_clip(value, depth=0):
     if isinstance(value, str):
         return value[:DSH_ARG_MAX]
+    if isinstance(value, (dict, list)) and depth >= DSH_CLIP_DEPTH:
+        return None
     if isinstance(value, dict):
-        return {k: _dsh_clip(v) for k, v in value.items()}
+        return {k: _dsh_clip(v, depth + 1) for k, v in value.items()}
     if isinstance(value, list):
-        return [_dsh_clip(v) for v in value[:50]]
+        return [_dsh_clip(v, depth + 1) for v in value[:50]]
     return value
 
 
@@ -1739,7 +1812,7 @@ def dsh_records(path):
         return []
     state = _DSH_TAILS.get(path)
     if state is None or size < state["offset"]:   # new, or rewritten from scratch
-        state = _DSH_TAILS[path] = {"offset": 0, "partial": b"", "records": []}
+        state = _DSH_TAILS[path] = {"offset": 0, "partial": b"", "records": [], "ship_calls": {}}
     if size > state["offset"]:
         try:
             with path.open("rb") as f:
@@ -1758,7 +1831,7 @@ def dsh_records(path):
                     continue
                 try:
                     entry = json.loads(raw)
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
                 if not isinstance(entry, dict):
                     continue
@@ -1767,14 +1840,23 @@ def dsh_records(path):
                 if kind == "tool/call":
                     try:
                         args = json.loads(body.get("arguments") or "{}")
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, RecursionError):
                         args = {}
-                    records.append(("call", at, body.get("callId"), str(body.get("name") or ""),
-                                    _dsh_clip(args) if isinstance(args, dict) else {}))
+                    name, args = str(body.get("name") or ""), _dsh_clip(args) if isinstance(args, dict) else {}
+                    records.append(("call", at, body.get("callId"), name, args))
+                    if ship_steps(command_of(name, args)):   # its output is read for ship events
+                        ship_calls = state.setdefault("ship_calls", {})
+                        ship_calls[body.get("callId")] = True
+                        while len(ship_calls) > DSH_TAIL_RECORDS:
+                            ship_calls.pop(next(iter(ship_calls)))
                 elif kind == "tool/result":
                     msg = body.get("message") or {}
-                    records.append(("result", at, msg.get("toolCallId"), bool(msg.get("isError")),
-                                    _result_text(msg.get("content"))[:DSH_ARG_MAX]))
+                    call_id = msg.get("toolCallId")
+                    # Only a shell call that can commit, push or open a PR keeps its output (clipped), to judge
+                    # the ship; every other result keeps none.
+                    can_ship = state.setdefault("ship_calls", {}).pop(call_id, False)
+                    records.append(("result", at, call_id, bool(msg.get("isError")),
+                                    _result_text(msg.get("content"))[:DSH_ARG_MAX] if can_ship else ""))
             del records[:-DSH_TAIL_RECORDS]
     return state["records"]
 
@@ -1865,7 +1947,7 @@ def parse_dsh(root=None, now=None):
         sub_label = ((rows.get("subagent") or {}).get("identity") or {}).get("label")
         # a subagent's own title row is drawn from its prompt; the label its parent gave it reads better
         own = rows.get("title")
-        title = str(((child_label or sub_label or own) if parent_id else own) or "").strip()
+        title = str(((child_label or sub_label or own) if parent_id else own) or "").strip()[:TITLE_MAX]
         model = ((rows.get("modelSelection") or {}).get("lastUsed") or {}).get("model")
         totals = (rows.get("tokenUsage") or {}).get("totals") or {}
         label = f"DeepSeek · {project} · {sid[-6:]}"
@@ -1903,6 +1985,19 @@ def parse_dsh(root=None, now=None):
 
 DROP = object()   # from Runtime.key or Runtime.parse: forget the unit's cached parse
 RUNTIME_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")   # what _canonical_domain leaves unchanged
+RUNTIME_ID_MAX = 40
+# Names on every JavaScript object (Object.prototype). The page keys tables by runtime id, so an id like
+# "constructor" is refused here (and the page uses own-property lookups as well).
+JS_RESERVED = frozenset(name.lower() for name in (
+    "constructor", "__proto__", "toString", "toLocaleString", "valueOf", "hasOwnProperty", "isPrototypeOf",
+    "propertyIsEnumerable", "__defineGetter__", "__defineSetter__", "__lookupGetter__", "__lookupSetter__"))
+
+
+def runtime_id_ok(value):
+    """A valid runtime id: lowercase letters and digits joined by single hyphens, at most RUNTIME_ID_MAX
+    characters, and not a JavaScript Object.prototype name."""
+    return (isinstance(value, str) and len(value) <= RUNTIME_ID_MAX and bool(RUNTIME_ID.fullmatch(value))
+            and value not in JS_RESERVED)
 RUNTIME_COLOR = re.compile(r"#[0-9a-fA-F]{6}")
 RUNTIME_LABEL_MAX = 40
 
@@ -1954,14 +2049,16 @@ class Runtime:
     """
 
     def __init__(self, id, label, color, *, roots, find, parse, key=file_key, aliases=(), order=None, source=None):
-        if not isinstance(id, str) or not RUNTIME_ID.fullmatch(id):
-            raise ValueError(f"runtime id must be lowercase letters, digits and single hyphens: {id!r}")
+        if not runtime_id_ok(id):
+            raise ValueError(f"runtime id must be lowercase letters, digits and single hyphens, at most "
+                             f"{RUNTIME_ID_MAX} characters, and not a JavaScript built-in name: {id!r}")
         if not isinstance(label, str) or not label.strip() or len(label) > RUNTIME_LABEL_MAX:
             raise ValueError(f"runtime label must be 1 to {RUNTIME_LABEL_MAX} characters: {label!r}")
         if color is not None and (not isinstance(color, str) or not RUNTIME_COLOR.fullmatch(color)):
             raise ValueError(f"runtime color must be #rrggbb or None: {color!r}")
         self.id, self.label, self.color = id, label.strip(), color.lower() if color else None
-        self.aliases = tuple(dict.fromkeys(str(a).strip().lower() for a in aliases if str(a).strip()))
+        self.aliases = tuple(dict.fromkeys(a for a in (str(a).strip().lower() for a in aliases)
+                                           if a and a not in JS_RESERVED))
         self.order = order
         self.roots, self.find, self.key, self.parse = roots, find, key, parse
         self.source = source or id
@@ -2017,6 +2114,28 @@ def _antigravity_key(path, now):
             now - newest <= ANTIGRAVITY_ACTIVE_S)
 
 
+ANTIGRAVITY_DBS_MAX = 64   # conversation databases read per refresh, newest first
+
+
+def _antigravity_find(root):
+    """The newest ANTIGRAVITY_DBS_MAX conversation databases (by their own or their -wal file's mtime), in the
+    order glob gives them."""
+    found = list(root.glob("*.db"))
+    if len(found) <= ANTIGRAVITY_DBS_MAX:
+        return found
+
+    def newest(path):
+        times = []
+        for p in (path, path.with_name(path.name + "-wal")):
+            try:
+                times.append(p.stat().st_mtime)
+            except OSError:
+                pass
+        return max(times, default=0.0)
+    keep = set(sorted(found, key=newest, reverse=True)[:ANTIGRAVITY_DBS_MAX])
+    return [p for p in found if p in keep]
+
+
 def _antigravity_parse(path, key, now, ctx):
     if "summaries" not in ctx:
         ctx["summaries"] = antigravity_summaries()   # once per pass, and only when a conversation changed
@@ -2044,7 +2163,7 @@ register_runtime(Runtime(
     parse=lambda path, key, now, ctx: parse_pi_file(path, now)))
 register_runtime(Runtime(
     "antigravity", "Google", "#ef7fae", aliases=("antigravity-cli", "agy", "google"),
-    roots=lambda: [ANTIGRAVITY_DIR / "conversations"], find=lambda root: root.glob("*.db"),
+    roots=lambda: [ANTIGRAVITY_DIR / "conversations"], find=_antigravity_find,
     key=_antigravity_key, parse=_antigravity_parse))
 register_runtime(Runtime(
     "deepseek", "DeepSeek", "#4d6bfe", aliases=("dsh",),
@@ -2056,8 +2175,9 @@ register_runtime(Runtime(
 # <FEED_DIR>/<runtime>/<session>.jsonl (feed.py writes them; docs/feed-format.md is the spec). The folder is
 # untrusted input: anything on the machine can write there. So: no symlinks, junctions or other reparse points
 # (root, folders or files), no hard-linked files, no UNC root; only a tail of each file, short lines, short strings;
-# and a path named inside an event is a label only: it is never opened, stat'ed or resolved. Only the fields the
-# spec lists are read, so message text (text, content, prompt, output, ...) is never kept.
+# and a path named inside an event is a label only: reading never opens, stats or resolves it (the user's Open
+# folder click in server.py is the one place a local folder is opened). Only the fields the spec lists are read, so
+# message text (text, content, prompt, output, ...) is never kept.
 
 FEED_ACTIVE_S = 6 * 60               # open while the newest line is this recent (as Pi / Codex / Antigravity)
 FEED_RUNTIMES_MAX = 32               # runtime folders read, by name
@@ -2089,7 +2209,7 @@ def _feed_root():
 
 def _plain(st):
     """A real file or folder: not a symlink, a junction or any other reparse point."""
-    return not stat.S_ISLNK(st.st_mode) and not (getattr(st, "st_file_attributes", 0) & _REPARSE_POINT)
+    return not stat.S_ISLNK(st.st_mode) and not ((getattr(st, "st_file_attributes", 0) or 0) & _REPARSE_POINT)
 
 
 def _plain_dir(path):
@@ -2300,7 +2420,7 @@ def parse_feed_file(path, runtime, label=None, now=None):
             name = _feed_text(entry.get("name"))
             if not name:
                 continue
-            target = _feed_text(entry.get("target"), FEED_PATH_MAX)
+            target = no_userinfo(_feed_text(entry.get("target"), FEED_PATH_MAX))
             touch(_feed_tool_targets(name, target, cwd), at, name, target)
             last_work = max(last_work, at)
         elif kind == "file":
@@ -2316,7 +2436,7 @@ def parse_feed_file(path, runtime, label=None, now=None):
             step = entry.get("kind")
             if step not in FEED_SHIP_KINDS:
                 continue
-            ref = _feed_text(entry.get("ref"), FEED_TEXT_MAX)
+            ref = no_userinfo(_feed_text(entry.get("ref"), FEED_TEXT_MAX))
             url = ref if step == "pr" and ref and PR_URL.fullmatch(ref) else None
             n = ship_count[(at, step)] = ship_count.get((at, step), 0) + 1
             ok = entry.get("ok")
@@ -2440,7 +2560,7 @@ def sync_feeds():
     folders = []
     if root and _plain_dir(root):
         folders = sorted(name for name, _ in _feed_entries(root, dirs=True)
-                         if len(name) <= RUNTIME_LABEL_MAX and RUNTIME_ID.fullmatch(name))[:FEED_RUNTIMES_MAX]
+                         if runtime_id_ok(name))[:FEED_RUNTIMES_MAX]
     extra, kept = [], set()
     for folder in folders:
         try:
@@ -2465,21 +2585,54 @@ def sync_feeds():
     return extra
 
 
+def _roster_ok(data):
+    """True for a roster whose parts have the types apply_rosters relies on; anything else is skipped whole."""
+    if not isinstance(data, dict):
+        return False
+    agents, events = data.get("agents"), data.get("events")
+    if agents is not None and not isinstance(agents, list):
+        return False
+    for a in agents or []:
+        if not isinstance(a, dict):
+            continue   # ignored, as before
+        if not all(a.get(k) is None or isinstance(a.get(k), str) for k in ("sessionId", "reportsTo", "provider",
+                                                                              "domain")):
+            return False
+        sessions = a.get("sessions")
+        if sessions is not None and (not isinstance(sessions, list) or not all(isinstance(x, str) for x in sessions)):
+            return False
+    if events is not None and not isinstance(events, list):
+        return False
+    for ev in events or []:
+        if not isinstance(ev, dict) or not all(ev.get(k) is None or isinstance(ev.get(k), str) for k in ("from", "to")):
+            return False
+        at = ev.get("at")
+        if at is not None and (isinstance(at, bool) or not isinstance(at, (int, float)) or not math.isfinite(at)):
+            return False
+    return True
+
+
 def load_rosters(now, directory=None):
-    """Roster files touched within the graph window, newest last."""
+    """Roster files touched within the graph window, newest last. A malformed one is skipped."""
     directory = directory or ROSTER_DIR
     out = []
     if not directory.is_dir():
         return out
-    for path in sorted(directory.glob("*.json"), key=lambda p: p.stat().st_mtime):
+    dated = []
+    for path in directory.glob("*.json"):
         try:
-            if now - path.stat().st_mtime > GRAPH_WINDOW_S:
-                continue
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            dated.append((path.stat().st_mtime, path))
+        except OSError:
             continue
-        if isinstance(data, dict):
-            data["_mtime"] = path.stat().st_mtime
+    for mtime, path in sorted(dated, key=lambda item: item[0]):
+        if now - mtime > GRAPH_WINDOW_S:
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
+            continue
+        if _roster_ok(data):
+            data["_mtime"] = mtime
             out.append(data)
     return out
 
@@ -2500,52 +2653,60 @@ def merge_alias(nodes, edges, alias, main) -> None:
 
 
 def apply_rosters(nodes, edges, rosters, now=None):
-    """Name agent nodes and add reporting edges from orchestrator rosters (in place)."""
+    """Name agent nodes and add reporting edges from orchestrator rosters (in place). A roster that still fails
+    (load_rosters already skips malformed ones) is left out; the others are applied."""
     for roster in rosters:
-        agents = [a for a in roster.get("agents") or [] if isinstance(a, dict) and a.get("sessionId")]
-        for a in agents:
-            for alias in a.get("sessions") or []:
-                if alias != a["sessionId"]:
-                    merge_alias(nodes, edges, alias, a["sessionId"])
-        manager_of = {}
-        for a in agents:
-            sid = a["sessionId"]
-            provider = a.get("provider") or "claude"
-            domain = _canonical_domain(a.get("domain") or provider)
-            node = nodes.setdefault(sid, {"kind": "agent", "label": sid, "provider": provider,
-                                          "domain": domain, "space": domain, "environment": "local"})
-            node.setdefault("provider", provider)
-            node.setdefault("domain", domain)
-            node.setdefault("space", domain)
-            for field in ("name", "role", "model", "tier", "team", "state", "provider", "domain", "environment"):
-                if a.get(field) is not None:
-                    node[field] = a[field]
-            if a.get("cloud") is True or a.get("environment") is not None:
-                node["environment"] = _environment(a)
-            if a.get("name"):
-                node["label"] = a["name"]
-            # Orchestrated agents (claude -p) have no session file; they're open while their run is.
-            node["rosterLive"] = a.get("state") != "done" and \
-                (now or 0) - roster.get("_mtime", now or 0) <= ROSTER_LIVE_S
-            boss = a.get("reportsTo")
-            if boss:
-                manager_of[sid] = boss
-                edges.setdefault((boss, sid, "reports"), {"count": 0, "lastAt": 0.0, "active": False})
-        for ev in roster.get("events") or []:
-            src, dst, at = ev.get("from"), ev.get("to"), ev.get("at") or 0.0
-            if not src or not dst:
-                continue
-            if manager_of.get(dst) == src:
-                key = (src, dst, "reports")
-            elif manager_of.get(src) == dst:
-                key = (dst, src, "reports")
-            else:
-                key = (src, dst, "message")
-            e = edges.setdefault(key, {"count": 0, "lastAt": 0.0, "active": False})
-            e["count"] += 1
-            e["lastAt"] = max(e["lastAt"], at)
-            if ev.get("active"):
-                e["active"] = True
+        try:
+            _apply_roster(nodes, edges, roster, now)
+        except Exception:
+            continue
+
+
+def _apply_roster(nodes, edges, roster, now):
+    agents = [a for a in roster.get("agents") or [] if isinstance(a, dict) and a.get("sessionId")]
+    for a in agents:
+        for alias in a.get("sessions") or []:
+            if alias != a["sessionId"]:
+                merge_alias(nodes, edges, alias, a["sessionId"])
+    manager_of = {}
+    for a in agents:
+        sid = a["sessionId"]
+        provider = a.get("provider") or "claude"
+        domain = _canonical_domain(a.get("domain") or provider)
+        node = nodes.setdefault(sid, {"kind": "agent", "label": sid, "provider": provider,
+                                      "domain": domain, "space": domain, "environment": "local"})
+        node.setdefault("provider", provider)
+        node.setdefault("domain", domain)
+        node.setdefault("space", domain)
+        for field in ("name", "role", "model", "tier", "team", "state", "provider", "domain", "environment"):
+            if a.get(field) is not None:
+                node[field] = a[field]
+        if a.get("cloud") is True or a.get("environment") is not None:
+            node["environment"] = _environment(a)
+        if a.get("name"):
+            node["label"] = a["name"]
+        # Orchestrated agents (claude -p) have no session file; they're open while their run is.
+        node["rosterLive"] = a.get("state") != "done" and \
+            (now or 0) - roster.get("_mtime", now or 0) <= ROSTER_LIVE_S
+        boss = a.get("reportsTo")
+        if boss:
+            manager_of[sid] = boss
+            edges.setdefault((boss, sid, "reports"), {"count": 0, "lastAt": 0.0, "active": False})
+    for ev in roster.get("events") or []:
+        src, dst, at = ev.get("from"), ev.get("to"), ev.get("at") or 0.0
+        if not src or not dst:
+            continue
+        if manager_of.get(dst) == src:
+            key = (src, dst, "reports")
+        elif manager_of.get(src) == dst:
+            key = (dst, src, "reports")
+        else:
+            key = (src, dst, "message")
+        e = edges.setdefault(key, {"count": 0, "lastAt": 0.0, "active": False})
+        e["count"] += 1
+        e["lastAt"] = max(e["lastAt"], at)
+        if ev.get("active"):
+            e["active"] = True
 
 
 class GraphStore:
@@ -2581,12 +2742,23 @@ class GraphStore:
         self._publish(now, load_rosters(now))
 
     def _refresh_runtime(self, runtime, now):
-        """Re-parse this runtime's units whose cache key changed; drop the ones it no longer has."""
+        """Re-parse this runtime's units whose cache key changed; drop the ones it no longer has.
+        One unit that raises (in key or parse) contributes nothing and never stops the others: a failed parse is
+        cached as empty under its key, so it is tried again only when the unit changes. A runtime whose find
+        raises is skipped this pass, its cache left as it was."""
+        try:
+            units = list(runtime.discover())
+        except Exception:
+            return
         seen, ctx = set(), {}
-        for unit in runtime.discover():
+        for unit in units:
             seen.add(unit)
             slot = (runtime.source, unit)
-            key = runtime.key(unit, now)
+            try:
+                key = runtime.key(unit, now)
+            except Exception:
+                self._files.pop(slot, None)
+                continue
             if key is None:
                 continue
             if key is DROP:
@@ -2595,7 +2767,10 @@ class GraphStore:
             cached = self._files.get(slot)
             if cached and cached[0] == key:
                 continue
-            parsed = runtime.parse(unit, key, now, ctx)
+            try:
+                parsed = runtime.parse(unit, key, now, ctx)
+            except Exception:
+                parsed = {"nodes": {}, "edges": {}, "open": {}, "failed": True}
             if parsed is DROP:
                 self._files.pop(slot, None)
             elif parsed is not None:
@@ -2666,8 +2841,9 @@ class GraphStore:
         for node in nodes.values():
             node.pop("_parentStub", None)
         # A roster can fold an agent's extra sessions into one node; their ships follow it there.
-        aliases = {alias: a["sessionId"] for roster in rosters for a in roster.get("agents") or []
-                   if isinstance(a, dict) and a.get("sessionId") for alias in a.get("sessions") or []}
+        aliases = {alias: a["sessionId"] for roster in rosters if isinstance(roster.get("agents"), list)
+                   for a in roster["agents"] if isinstance(a, dict) and isinstance(a.get("sessionId"), str)
+                   and isinstance(a.get("sessions"), list) for alias in a["sessions"] if isinstance(alias, str)}
         doc_groups = {}
         for node in nodes.values():
             if node.get("kind") == "doc" and node.get("group"):

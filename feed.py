@@ -28,7 +28,9 @@ import argparse
 import json
 import os
 import re
+import stat
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -49,14 +51,32 @@ SHIP_KINDS = ("commit", "push", "pr")
 COLOR = re.compile(r"#[0-9a-fA-F]{6}")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 _LOCK_AT = 2 ** 31 - 2   # Windows: lock one byte far past any real feed's end, so readers are never blocked
+# graph.JS_RESERVED: names on every JavaScript object, refused as runtime ids (the page keys tables by id)
+JS_RESERVED = frozenset(name.lower() for name in (
+    "constructor", "__proto__", "toString", "toLocaleString", "valueOf", "hasOwnProperty", "isPrototypeOf",
+    "propertyIsEnumerable", "__defineGetter__", "__defineSetter__", "__lookupGetter__", "__lookupSetter__"))
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 def _check_id(value, pattern, cap, what):
-    if not isinstance(value, str) or len(value) > cap or not pattern.fullmatch(value):
+    if not isinstance(value, str) or len(value) > cap or not pattern.fullmatch(value) or value in JS_RESERVED:
         raise ValueError(f"{what} must be lowercase letters and digits joined by single "
                          f"{'hyphens or underscores' if pattern is SESSION_ID else 'hyphens'}, at most {cap} "
-                         f"characters: {value!r}")
+                         f"characters, and not a JavaScript built-in name: {value!r}")
     return value
+
+
+def _plain(st):
+    """graph._plain, copied so feed.py stays standalone: not a symlink, a junction or any other reparse point."""
+    return not stat.S_ISLNK(st.st_mode) and not ((getattr(st, "st_file_attributes", 0) or 0) & _REPARSE_POINT)
+
+
+def _plain_folder(folder):
+    """Create folder if needed, then refuse it unless it is a real folder (the dashboard would not read it)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    st = os.lstat(folder)
+    if not _plain(st) or not stat.S_ISDIR(st.st_mode):
+        raise ValueError(f"{folder} is a link or junction, not a folder; the dashboard does not read it")
 
 
 def _text(value, cap):
@@ -75,9 +95,28 @@ def _root(root):
 
 
 def _append(path, data):
+    """Append data to a plain, single-link session file (created if missing). A symlink, junction or hard link
+    at the path is refused before anything is written, also one swapped in while the file was being opened.
+    The folder is checked again after opening too: that narrows, but cannot close, the window in which the folder
+    could be swapped for a junction (Python has no portable openat)."""
+    folder = os.lstat(os.path.dirname(os.path.abspath(path)))
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        before = None
+    if before is not None and (not _plain(before) or not stat.S_ISREG(before.st_mode) or before.st_nlink > 1):
+        raise ValueError(f"{path} is a link or not a plain file; refusing to write to it")
     flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags, 0o644)
     try:
+        opened, now_at_path = os.fstat(fd), os.lstat(path)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink > 1 or not _plain(now_at_path)
+                or (opened.st_ino, opened.st_dev) != (now_at_path.st_ino, now_at_path.st_dev)
+                or (before is not None and (before.st_ino, before.st_dev) != (opened.st_ino, opened.st_dev))):
+            raise ValueError(f"{path} changed into a link or another file while opening; refusing to write")
+        folder_now = os.lstat(os.path.dirname(os.path.abspath(path)))
+        if not _plain(folder_now) or (folder_now.st_ino, folder_now.st_dev) != (folder.st_ino, folder.st_dev):
+            raise ValueError(f"the folder of {path} changed while opening; refusing to write")
         if os.name == "nt":
             import msvcrt
             os.lseek(fd, _LOCK_AT, os.SEEK_SET)
@@ -119,7 +158,8 @@ class FeedWriter:
         data = (json.dumps(line, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
         if len(data) > LINE_MAX:
             raise ValueError(f"line is {len(data)} bytes; the reader skips lines over {LINE_MAX}")
-        self.folder.mkdir(parents=True, exist_ok=True)
+        _plain_folder(self.folder.parent)
+        _plain_folder(self.folder)
         _append(self.path, data)
         return line
 
@@ -175,10 +215,21 @@ def describe_runtime(runtime, label=None, color=None, aliases=(), root=None):
     if aliases:
         meta["aliases"] = [a.lower() for a in aliases]
     folder = _root(root) / runtime
-    folder.mkdir(parents=True, exist_ok=True)
-    tmp = folder / f".runtime.{os.getpid()}.tmp"
-    tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, folder / "runtime.json")
+    _plain_folder(folder.parent)
+    _plain_folder(folder)
+    # A new, uniquely named file (O_EXCL), then an atomic rename over runtime.json: nothing planted at a
+    # predictable name, or linked from runtime.json, is ever written through.
+    fd, tmp = tempfile.mkstemp(dir=folder, prefix=".runtime.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
+        os.replace(tmp, folder / "runtime.json")
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return meta
 
 

@@ -18,11 +18,15 @@ a temporary folder.
 
 ## Rules
 
-- **Privacy:** never keep or send message text, prompts, tool input or tool output. Only ids, names, models,
-  folders, tool names, the paths and URLs tools acted on, and timestamps are read.
+- **Privacy (the graph APIs: `/api/graph`, `/api/flow`, `/api/waits`):** kept are ids, names and titles
+  (either can be the start of a prompt: a job's name falls back to 60 characters of its intent, a title is cut
+  to 200), models, folders, tool names, paths and URLs tools acted on, timestamps, and a first-line detail of each tool call (at most 160 characters, URL credentials
+  removed). Never message text or tool output. Output is read in two bounded cases only: a shell call that
+  commits, pushes or opens a PR (to tell whether it went through), and a Jev result (a fixed list of fields, see
+  the README). `/api/jobs` and `/api/logs` serve a job's text and its terminal output by design.
 - Standard library only (Python); no new scripts or styles on the page. No network calls.
-- Files read from disk are untrusted: cap what is read, do not follow links, and never open or stat a path named
-  inside the data.
+- Files read from disk are untrusted: cap what is read, do not follow links, and in new code never open or stat a
+  path named inside the data.
 
 ## Map
 

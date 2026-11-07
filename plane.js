@@ -30,6 +30,8 @@
   const VIEW_KEY = "agent-dashboard-view";  // the filter bar's choices, per viewer
   const CUBE_SCALE = 0.62;       // a cube's half-size per sphere radius (layoutScene also shrinks the scene a little on cubes)
   const isAgent = n => n.kind === "agent" || n.kind === "subagent";
+  // Lookups keyed by data (runtime ids, kinds) see only a table's own entries, never Object.prototype's.
+  const own = (table, key) => (Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined);
   const STATE_COLOR = { blocked: "--blocked", working: "--working", idle: "--idle", done: "--done", other: "--other" };
   const DOMAIN_COLORS = { claude: "#e9a960", claude_code: "#e9a960", "claude-code": "#e9a960",
     codex: "#9a88ff", pi: "#62d1c8", openai: "#6fa8ff", gpt: "#6fa8ff", antigravity: "#ef7fae", deepseek: "#4d6bfe", cloud: "#74c7ec" };
@@ -114,8 +116,8 @@
     if (n.kind === "agent" || n.kind === "subagent") {
       return colors["state_" + (n.state || (n.kind === "subagent" ? "idle" : "other"))] || colors.state_other;
     }
-    return { web: colors.accent, doc: colors.ink, area: colors.accent, tool: colors.muted, msg: colors.edge_message,
-             skill: colors.accent }[n.kind] || colors.muted;
+    return own({ web: colors.accent, doc: colors.ink, area: colors.accent, tool: colors.muted, msg: colors.edge_message,
+             skill: colors.accent }, n.kind) || colors.muted;
   }
 
   function localPoint(e) {
@@ -139,24 +141,24 @@
   function domainOf(node) {
     if (F) return F.canonicalDomain(node.domain || node.provider || "other");
     const raw = String(node.domain || node.provider || "other").toLowerCase();
-    return ({ "claude-code": "claude", claude_code: "claude", "claude code": "claude", anthropic: "claude",
+    return own({ "claude-code": "claude", claude_code: "claude", "claude code": "claude", anthropic: "claude",
       "codex-cli": "codex", codex_cli: "codex", openai: "codex", gpt: "codex",   // one "GPT" runtime
-      "antigravity-cli": "antigravity", agy: "antigravity", dsh: "deepseek" })[raw] || raw;
+      "antigravity-cli": "antigravity", agy: "antigravity", dsh: "deepseek" }, raw) || raw;
   }
 
   function domainLabel(domain) {
     const info = F && F.servedRuntime(domain);   // the server's label for a runtime it reads
     if (info) return info.label.toUpperCase();
-    return ({ claude: "CLAUDE", claude_code: "CLAUDE", "claude-code": "CLAUDE",
+    return own({ claude: "CLAUDE", claude_code: "CLAUDE", "claude-code": "CLAUDE",
       codex: "GPT", openai: "GPT", gpt: "GPT", pi: "PI", antigravity: "GOOGLE", deepseek: "DEEPSEEK",
-      cloud: "CLOUD" })[domain] || String(domain).replace(/[-_]/g, " ").toUpperCase();
+      cloud: "CLOUD" }, domain) || String(domain).replace(/[-_]/g, " ").toUpperCase();
   }
 
   const hashedColors = new Map();   // runtime -> colour hashed from its id, for runtimes with no colour of their own
   function domainColor(domain) {
     const info = F && F.servedRuntime(domain);
     if (info && info.color && info.id === domain) return info.color;   // the server's colour for its runtime
-    if (DOMAIN_COLORS[domain]) return DOMAIN_COLORS[domain];          // built in, and the older spellings
+    if (own(DOMAIN_COLORS, domain)) return own(DOMAIN_COLORS, domain);   // built in, and the older spellings
     if (info && info.color) return info.color;                         // another spelling of a served runtime
     if (!F) return colors.accent || "#8ba8ff";
     if (!hashedColors.has(domain)) hashedColors.set(domain, F.hashColor(domain));
@@ -307,7 +309,7 @@
     // A runtime with no fixed spot takes the free direction farthest from the five fixed ones and from each other.
     const taken = ["claude", "codex", "pi", "antigravity", "deepseek"].map(d => fixed[d]);
     sorted.forEach((domain, i) => {
-      let v = fixed[domain];
+      let v = own(fixed, domain);
       if (!v && F && F.freeDirection) {
         v = F.freeDirection(taken);
         taken.push(v);
@@ -549,7 +551,7 @@
     for (const edge of data.edges) {
       const src = byId.get(edge.src), dst = byId.get(edge.dst);
       if (!src || !dst || !isAgent(src) || isAgent(dst)) continue;
-      const domain = domainOf(src), record = usage.get(dst.id) || { weights: {}, cloud: new Set() };
+      const domain = domainOf(src), record = usage.get(dst.id) || { weights: Object.create(null), cloud: new Set() };
       record.weights[domain] = (record.weights[domain] || 0) + (edge.count || 1);
       if (src.environment === "cloud") record.cloud.add(domain);
       usage.set(dst.id, record);
@@ -1377,7 +1379,7 @@
     const ordered = [...clusters].filter(([, members]) => members.length >= 2)
       .sort((a, b) => inUse(b[1]) - inUse(a[1]) || b[1].length - a[1].length || a[0].localeCompare(b[0]));
     for (const [key, members] of ordered) {
-      const colorWeights = {};
+      const colorWeights = Object.create(null);
       for (const n of members) for (const [domain, weight] of Object.entries(n.domainWeights || {})) {
         colorWeights[domain] = (colorWeights[domain] || 0) + Number(weight || 0);
       }
@@ -1556,7 +1558,7 @@
 
   function radiusOf(n) {
     if (n.id === JEV_NODE) return 7;
-    const base = KIND_RADIUS[n.kind] || 5;
+    const base = own(KIND_RADIUS, n.kind) || 5;
     return isAgent(n) && n.tier !== null ? base + (n.tier === 0 ? 3 : n.tier === 1 ? 1.5 : 0) : base;
   }
 

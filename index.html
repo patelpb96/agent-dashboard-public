@@ -564,7 +564,7 @@ function updateRuntimeStatus(agents) {
   for (const agent of agents) {
     const domain = String(agent.domain || agent.provider || "other").toLowerCase();
     const served = F && F.servedRuntime ? F.servedRuntime(domain) : null;
-    const name = (served && served.label) || labels[domain] || domain;
+    const name = (served && served.label) || (Object.prototype.hasOwnProperty.call(labels, domain) && labels[domain]) || domain;
     counts.set(name, (counts.get(name) || 0) + 1);
   }
   const domains = [...counts].sort(([a], [b]) => a.localeCompare(b))

@@ -58,13 +58,15 @@ duplicate them, link them.
 
 Rules your writer must follow:
 
-- Runtime id: `[a-z0-9]+(-[a-z0-9]+)*`, at most 40 characters. Session id: the same plus single underscores, at most
-  128 characters. `feed.py` refuses anything else (exit code 1, nothing written). If your harness's session ids
+- Runtime id: `[a-z0-9]+(-[a-z0-9]+)*`, at most 40 characters, and not a JavaScript built-in name such as
+  `constructor`. Session id: the same plus single underscores, at most 128 characters. `feed.py` refuses anything
+  else (exit code 1, nothing written). If your harness's session ids
   do not fit, map them, for example in Python:
   `re.sub(r"[^a-z0-9]+", "-", raw.lower())[:128].strip("-") or "session"`.
 - A runtime id that is already a built-in runtime or one of its other spellings (`claude`, `codex`, `openai`,
   `pi`, `antigravity`, `deepseek`, ...) adds your sessions to that runtime instead of making a new one.
-- Never pass message text, prompts, tool input or tool output. `--target` is a path or URL, not a command line.
+- Never pass message text, prompts or tool output. `--target` is a path or URL, not a command line; its first line
+  (at most 160 characters) is shown in the flow view.
 - A session is drawn as open while its newest line is under 6 minutes old and no `end` came after it. Any line
   counts, so a long run with no tool calls can repeat its `session` line every few minutes to stay open.
 - Write `end` when the session finishes, so it leaves the plane at once.
@@ -268,14 +270,23 @@ nodes as other runtimes'.
    the cache key, or a session stays open until its file changes: see `_antigravity_key` and `_feed_key`.
 6. **Tests.** Add `test_my_harness.py` from the template in section 4, with a small fixture written in the test.
    The existing tests read the list of registered runtimes from `graph.RUNTIMES`, so they need no change.
-7. **Privacy.** Read only what the graph draws: ids, names, model, working folder, tool names, the file paths and
-   URLs tools acted on, timestamps. Never keep message text, prompts, tool input or output. A test must prove a
-   sentinel string in those fields does not reach the snapshot.
+7. **Privacy.** Keep only what the graph draws: ids, names, model, working folder, tool names, the file paths and
+   URLs tools acted on, timestamps, and a first-line detail of each call (use `detail_of`: at most 160 characters,
+   URL credentials removed). A session title may come from the start of a prompt; cut it to 200 characters
+   (`TITLE_MAX`). Never keep message text or tool output. Output is read in two bounded cases only: a shell call's
+   output to judge a ship (as `ship_events` does; read it only for calls `ship_steps` recognises, and keep only
+   the ship event), and a Jev result (`jev_outcome`: a fixed list of fields). A test must prove a sentinel string
+   in those fields does not reach the snapshot.
 8. **Untrusted input.** Anything on the machine can write the files you read:
    - read a capped tail of each file (as `FEED_TAIL_BYTES`), skip lines over a cap, cap every string;
    - do not follow symlinks or junctions: `_feed_open` and `_plain_dir` show how;
    - never open, stat or resolve a path named inside the data; such paths are labels;
-   - skip malformed lines; never let one bad file raise out of `parse` (catch, and return `DROP`).
+   - skip malformed lines, and catch `ValueError` and `RecursionError` around `json.loads`.
+
+   The store also isolates a failing unit, and the other units and runtimes carry on. A `parse` that raises is
+   cached as nothing under the unit's key, so it is tried again only when the key changes. A `key` that raises,
+   or a `parse` that returns `None`, is tried again on the next refresh. Catching inside your parser (and
+   returning `DROP`) is still good practice: it keeps the rest of that unit's data.
 
 ## 4. Test template
 
@@ -380,7 +391,8 @@ Native adapter (Path B), all of the above with your own folder instead of a feed
 
 ## 6. What not to do
 
-- Do not keep or send message text, prompts, tool input or tool output, in a feed or a parser.
+- Do not keep or send message text, prompts or tool output, in a feed or a parser. What may be kept is listed in
+  checklist step 7.
 - Do not make network calls. The dashboard only reads local files.
 - Do not add dependencies. The server and `feed.py` are Python standard library only; the page loads nothing new.
 - Do not edit the five built-in parsers (`parse_file`, `parse_codex_file`, `parse_pi_file`, `parse_antigravity_db`,

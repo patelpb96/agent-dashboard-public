@@ -11,8 +11,8 @@ appending JSON lines to a file. `feed.py` writes them for you, from Python or fr
 ```
 
 - `<root>` is `AGENT_DASH_FEED_DIR`, default `~/.agent-dashboard/feeds`. A UNC path (`\\host\share`) turns feeds off.
-- `<runtime>`: lowercase letters and digits joined by single hyphens, at most 40 characters (`opencode`,
-  `my-tool`). A folder named after a runtime the dashboard already reads, or one of its other spellings
+- `<runtime>`: lowercase letters and digits joined by single hyphens, at most 40 characters, and not a JavaScript
+  built-in name such as `constructor` (`opencode`, `my-tool`). A folder named after a runtime the dashboard already reads, or one of its other spellings
   (`claude`, `codex`, `openai`, `pi`, `antigravity`, `deepseek`, ...), adds its sessions to that runtime and keeps
   its name, colour and logo. Any other name is a new runtime.
 - `<session>`: lowercase letters and digits joined by single hyphens or underscores, at most 128 characters.
@@ -30,8 +30,10 @@ Every line is one JSON object with `"v": 1`, `"t"` (epoch seconds, or ISO 8601) 
 | `ship` | `kind`: `commit` \| `push` \| `pr`, `ref` (branch, or for a PR its `https://github.com/<o>/<r>/pull/<n>` URL), `ok` (optional, default `true`) | a ship beam and a row in the Ships window |
 | `end` | none | the session is over |
 
-Unknown types and unknown fields are ignored. Paths are labels only: the dashboard never opens, stats or resolves a
-path named in a line. A relative path is taken against the session's `cwd`.
+Unknown types and unknown fields are ignored. Paths are labels: while reading feeds the dashboard does not open,
+stat or resolve a path named in a line. The only time it acts on one is when you click **Open folder** on a file's
+node: it then opens that folder in your file manager, local folders only (network paths are refused). A relative
+path is taken against the session's `cwd`.
 
 A session is **open** while its newest line is under 6 minutes old and no `end` has come after it, and working
 while its newest `tool` or `file` line is under 2 minutes old. A line's time is never taken as later than the file's
@@ -43,9 +45,10 @@ back to the default (the folder name in title case).
 
 ## Privacy
 
-There are no text fields. Message text, prompts, tool input and output are never written by `feed.py` and never
-read by the dashboard: fields such as `text`, `content`, `prompt` or `output` are dropped like any unknown field. A
-`target` is meant to be a path or URL, not a command line.
+There are no text fields. Message text, prompts and tool output are never written by `feed.py` and never read by
+the dashboard: fields such as `text`, `content`, `prompt` or `output` are dropped like any unknown field. A `target`
+is meant to be a path or URL, not a command line; its first line (at most 160 characters) is shown in the flow view.
+Any `user:password@` is removed from URLs in a `target` and in a ship's `ref`.
 
 ## Caps
 

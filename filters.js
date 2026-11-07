@@ -30,6 +30,9 @@
   let served = null;
 
   const isAgent = n => !!n && (n.kind === "agent" || n.kind === "subagent");
+  // A table lookup that only sees the table's own entries: an id like "constructor" or "__proto__" must not find
+  // Object.prototype's members.
+  const own = (table, key) => (Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined);
 
   // Plain text only: no control characters, trimmed, capped. (The page still puts it in the DOM as text, never HTML.)
   function cleanText(value, max) {
@@ -70,7 +73,7 @@
       if (served.byId.has(key)) return key;
       if (served.aliases.has(key)) return served.aliases.get(key);
     }
-    return DOMAIN_ALIASES[key] || key;
+    return own(DOMAIN_ALIASES, key) || key;
   }
   const domainOfNode = n => canonicalDomain(n.domain || n.provider || "other");
 
@@ -80,7 +83,7 @@
     const d = canonicalDomain(domain);
     const info = served && served.byId.get(d);
     if (info) return info.label;
-    return RUNTIME_NAMES[d] || d.replace(/[-_]+/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+    return own(RUNTIME_NAMES, d) || d.replace(/[-_]+/g, " ").replace(/\b\w/g, c => c.toUpperCase());
   }
 
   // The server's entry for a runtime ({id, label, color, order, aliases}), or null (no metadata, or not listed).
@@ -271,7 +274,7 @@
     return new Set(sorted.slice(0, Math.max(0, cap)).map(it => it.key));
   }
 
-  const api = { RESOURCE_MODES, LAYOUTS, ACTIVE_WINDOW_S, canonicalDomain, runtimeName, modelKey, runtimesPresent,
+  const api = { RESOURCE_MODES, LAYOUTS, ACTIVE_WINDOW_S, own, canonicalDomain, runtimeName, modelKey, runtimesPresent,
     useRuntimes, servedRuntime, builtinRuntime, extraRuntime, hashColor, freeDirection,
     defaultView, normalizeView, parseView, serializeView, isDefaultView, filterGraph, visibleEdges, edgeRecent,
     cubePoint, cubeNormal, cubeEdges, pickLabels };
